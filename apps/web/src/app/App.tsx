@@ -49,6 +49,8 @@ type NetworkSample = {
   kilobitsPerSecond: number | null;
 };
 
+type ThemeMode = "light" | "dark";
+
 const MAX_NETWORK_SAMPLES = 240;
 
 const createDeviceId = () => {
@@ -60,6 +62,15 @@ const createDeviceId = () => {
   const value = crypto.randomUUID();
   localStorage.setItem("radio.deviceId", value);
   return value;
+};
+
+const createThemeMode = (): ThemeMode => {
+  const stored = localStorage.getItem("radio.theme");
+  if (stored === "dark" || stored === "light") {
+    return stored;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 };
 
 const formatMs = (value: number | null, digits = 1) => {
@@ -158,8 +169,14 @@ export function App() {
     jitterMs: null
   });
   const [networkSamples, setNetworkSamples] = useState<NetworkSample[]>([]);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(createThemeMode);
 
   const deviceId = useMemo(createDeviceId, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+    localStorage.setItem("radio.theme", themeMode);
+  }, [themeMode]);
 
   useEffect(() => {
     const worker = new Worker(new URL("../workers/radio-worker.ts", import.meta.url), {
@@ -353,6 +370,16 @@ export function App() {
           <h1>Shouss de Radio</h1>
         </div>
         <div className="topbar-actions">
+          <label className="theme-toggle">
+            <span>深色</span>
+            <input
+              type="checkbox"
+              checked={themeMode === "dark"}
+              onChange={(event) =>
+                setThemeMode(event.currentTarget.checked ? "dark" : "light")
+              }
+            />
+          </label>
           <button onClick={connect} disabled={connectionState === "connected"}>
             连接
           </button>
@@ -429,7 +456,7 @@ export function App() {
             <span className="legend-lead">Lead Drift</span>
           </div>
         </div>
-        <NetworkChart samples={networkSamples} />
+        <NetworkChart samples={networkSamples} themeMode={themeMode} />
       </section>
 
       <section className="debug-grid">
@@ -513,7 +540,13 @@ function MetricCard({
   );
 }
 
-function NetworkChart({ samples }: { samples: NetworkSample[] }) {
+function NetworkChart({
+  samples,
+  themeMode
+}: {
+  samples: NetworkSample[];
+  themeMode: ThemeMode;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -536,7 +569,17 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
 
-    context.fillStyle = "#fbfcfa";
+    const styles = getComputedStyle(document.documentElement);
+    const color = (name: string) => styles.getPropertyValue(name).trim();
+    const chartBackground = color("--chart-background");
+    const chartGrid = color("--chart-grid");
+    const chartText = color("--chart-text");
+    const chartLeadZero = color("--chart-lead-zero");
+    const chartRtt = color("--chart-rtt");
+    const chartJitter = color("--chart-jitter");
+    const chartLead = color("--chart-lead");
+
+    context.fillStyle = chartBackground;
     context.fillRect(0, 0, width, height);
 
     const paddingLeft = 58;
@@ -551,7 +594,7 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
       {
         label: "RTT",
         unit: "ms",
-        color: "#16736b",
+        color: chartRtt,
         values: samples.map((sample) => sample.rttMs),
         map: (value: number, max: number) => 1 - value / max,
         scale: maxOf(samples.map((sample) => sample.rttMs), 80)
@@ -559,7 +602,7 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
       {
         label: "Jitter",
         unit: "ms",
-        color: "#c4513c",
+        color: chartJitter,
         values: samples.map((sample) => sample.jitterMs),
         map: (value: number, max: number) => 1 - value / max,
         scale: maxOf(samples.map((sample) => sample.jitterMs), 40)
@@ -567,14 +610,14 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
       {
         label: "Lead",
         unit: "ms",
-        color: "#b78311",
+        color: chartLead,
         values: samples.map((sample) => sample.leadDriftMs),
         map: (value: number, max: number) => 0.5 - value / (max * 2),
         scale: maxAbsOf(samples.map((sample) => sample.leadDriftMs), 120)
       }
     ];
 
-    context.strokeStyle = "#d8dfd8";
+    context.strokeStyle = chartGrid;
     context.lineWidth = 1;
     for (let index = 0; index <= 3; index += 1) {
       const y = paddingTop + index * laneHeight;
@@ -593,7 +636,7 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
       const laneCenter = laneTop + laneHeight / 2;
       const latest = latestValue(lane.values);
 
-      context.fillStyle = "#66746c";
+      context.fillStyle = chartText;
       context.fillText(lane.label, 12, laneCenter - 8);
       context.fillText(
         latest === null ? "-" : `${latest.toFixed(1)} ${lane.unit}`,
@@ -602,7 +645,7 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
       );
 
       if (lane.label === "Lead") {
-        context.strokeStyle = "#e4d8b7";
+        context.strokeStyle = chartLeadZero;
         context.beginPath();
         context.moveTo(paddingLeft, laneCenter);
         context.lineTo(width - paddingRight, laneCenter);
@@ -637,7 +680,7 @@ function NetworkChart({ samples }: { samples: NetworkSample[] }) {
 
       context.stroke();
     });
-  }, [samples]);
+  }, [samples, themeMode]);
 
   return <canvas ref={canvasRef} className="network-canvas" aria-label="Network fluctuation" />;
 }
