@@ -165,6 +165,11 @@ export function App() {
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const streamEnabledRef = useRef(false);
   const targetLatencyRef = useRef<number | null>(null);
+  const clockRef = useRef<ClockState>({
+    rttMs: null,
+    clockOffsetMs: null,
+    sampleCount: 0
+  });
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [clock, setClock] = useState<ClockState>({
     rttMs: null,
@@ -217,6 +222,10 @@ export function App() {
     document.documentElement.dataset.theme = themeMode;
     localStorage.setItem("radio.theme", themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    clockRef.current = clock;
+  }, [clock]);
 
   useEffect(() => {
     localStorage.setItem("radio.deviceOutputOffsetMs", `${deviceOutputOffsetMs}`);
@@ -422,6 +431,15 @@ export function App() {
             kilobitsPerSecond: null
           })
         );
+        workerRef.current?.postMessage({
+          type: "reportClientStatus",
+          rttMs: clockRef.current.rttMs ?? 0,
+          clockOffsetMs: clockRef.current.clockOffsetMs ?? 0,
+          bufferMs: event.data.bufferLeadMs ?? 0,
+          playbackErrorMs: syncErrorMs ?? 0,
+          resampleRatio: event.data.playbackRatio ?? 1,
+          underruns: event.data.underruns
+        } satisfies WorkerCommand);
       }
     };
     node.connect(audioContext.destination);

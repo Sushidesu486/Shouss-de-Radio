@@ -49,7 +49,16 @@ export type WorkerCommand =
   | { type: "connect"; deviceId: string }
   | { type: "disconnect" }
   | { type: "setAudioEnabled"; enabled: boolean }
-  | { type: "setDeviceOffset"; offsetMs: number };
+  | { type: "setDeviceOffset"; offsetMs: number }
+  | {
+      type: "reportClientStatus";
+      rttMs: number;
+      clockOffsetMs: number;
+      bufferMs: number;
+      playbackErrorMs: number;
+      resampleRatio: number;
+      underruns: number;
+    };
 
 export type WorkerEvent =
   | {

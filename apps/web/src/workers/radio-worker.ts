@@ -342,4 +342,16 @@ self.addEventListener("message", (event: MessageEvent<WorkerCommand>) => {
   if (event.data.type === "setDeviceOffset") {
     deviceOutputOffsetMs = event.data.offsetMs;
   }
+
+  if (event.data.type === "reportClientStatus") {
+    send({
+      type: "clientStatus",
+      rttMs: event.data.rttMs,
+      clockOffsetMs: event.data.clockOffsetMs,
+      bufferMs: event.data.bufferMs,
+      playbackErrorMs: event.data.playbackErrorMs,
+      resampleRatio: event.data.resampleRatio,
+      underruns: event.data.underruns
+    });
+  }
 });
