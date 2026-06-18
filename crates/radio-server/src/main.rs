@@ -347,7 +347,7 @@ async fn handle_audio_socket(mut socket: WebSocket, state: Arc<AppState>) {
         state.broadcast_track_info_if_changed(sample_index);
 
         let header = AudioPacketHeader {
-            codec: AudioCodec::PcmF32,
+            codec: AudioCodec::PcmS16,
             seq,
             first_sample_index: sample_index,
             frame_count,
@@ -601,7 +601,7 @@ impl AudioPlaylist {
 
     fn payload_for(&self, first_sample_index: u64, frame_count: u32) -> Vec<u8> {
         let channel_count = 2_usize;
-        let mut payload = Vec::with_capacity(frame_count as usize * channel_count * 4);
+        let mut payload = Vec::with_capacity(frame_count as usize * channel_count * 2);
 
         for frame in 0..frame_count as u64 {
             let (track_index, source_frame) = self.track_position_at(first_sample_index + frame);
@@ -609,11 +609,22 @@ impl AudioPlaylist {
             let sample_offset = source_frame as usize * channel_count;
 
             for channel in 0..channel_count {
-                payload.extend_from_slice(&track.samples[sample_offset + channel].to_le_bytes());
+                payload.extend_from_slice(
+                    &f32_to_i16(track.samples[sample_offset + channel]).to_le_bytes(),
+                );
             }
         }
 
         payload
+    }
+}
+
+fn f32_to_i16(sample: f32) -> i16 {
+    let sample = sample.clamp(-1.0, 1.0);
+    if sample >= 0.0 {
+        (sample * i16::MAX as f32).round() as i16
+    } else {
+        (sample * -(i16::MIN as f32)).round() as i16
     }
 }
 

@@ -11,6 +11,7 @@ pub const AUDIO_PACKET_HEADER_LEN: usize = 54;
 #[serde(rename_all = "snake_case")]
 pub enum AudioCodec {
     PcmF32,
+    PcmS16,
     Opus,
 }
 
@@ -19,6 +20,7 @@ impl AudioCodec {
         match self {
             AudioCodec::PcmF32 => 1,
             AudioCodec::Opus => 2,
+            AudioCodec::PcmS16 => 3,
         }
     }
 
@@ -26,6 +28,7 @@ impl AudioCodec {
         match value {
             1 => Ok(AudioCodec::PcmF32),
             2 => Ok(AudioCodec::Opus),
+            3 => Ok(AudioCodec::PcmS16),
             _ => Err(AudioPacketError::UnsupportedCodec(value)),
         }
     }

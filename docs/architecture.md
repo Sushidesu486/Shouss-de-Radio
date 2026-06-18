@@ -15,6 +15,7 @@ playback correction, and device-specific rendering.
 - Maintain authoritative server time and stream sample timeline.
 - Load `.flac` and `.wav` files in `media/tracks` as a sorted looping playlist.
 - Decode source audio into a cached 48 kHz stereo float32 timeline.
+- Send the public stream as 16-bit PCM packets to reduce tunnel bandwidth.
 - Encode the shared stream once, then broadcast the same packets to clients.
 - Attach sequence, sample index, and presentation time to every audio packet.
 - Accept client health reports: RTT, offset, buffer, underruns, drift.

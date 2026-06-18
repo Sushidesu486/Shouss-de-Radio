@@ -35,6 +35,21 @@ const post = (event: WorkerEvent) => workerScope.postMessage(event);
 
 const nowMs = () => performance.timeOrigin + performance.now();
 
+const pcmPayloadToFloat32 = (payload: ArrayBuffer, codec: "pcm_f32" | "pcm_s16") => {
+  if (codec === "pcm_f32") {
+    return payload;
+  }
+
+  const source = new Int16Array(payload);
+  const target = new Float32Array(source.length);
+  for (let index = 0; index < source.length; index += 1) {
+    const sample = source[index];
+    target[index] = sample < 0 ? sample / 32_768 : sample / 32_767;
+  }
+
+  return target.buffer;
+};
+
 const estimateClock = (
   clientSendTimeMs: number,
   serverReceiveTimeMs: number,
@@ -197,10 +212,16 @@ const startAudioSocket = () => {
     audioStats.packetGapMs = packetGapMs;
     audioStats.jitterMs = jitterMs;
 
+    if (packet.header.codec !== "pcm_f32" && packet.header.codec !== "pcm_s16") {
+      return;
+    }
+
+    const floatPayload = pcmPayloadToFloat32(packet.payload, packet.header.codec);
+
     workerScope.postMessage(
       {
         type: "audioPacket",
-        payload: packet.payload,
+        payload: floatPayload,
         frameCount: packet.header.frameCount,
         sampleRateHz: packet.header.sampleRateHz,
         channelCount: packet.header.channelCount,
@@ -208,7 +229,7 @@ const startAudioSocket = () => {
         serverPresentationTimeNs: packet.header.serverPresentationTimeNs,
         targetPlaybackTimeMs
       } satisfies WorkerEvent,
-      [packet.payload]
+      [floatPayload]
     );
 
     if (performance.now() - audioStats.lastPostAtMs > 250) {

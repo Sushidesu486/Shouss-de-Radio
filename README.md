@@ -68,7 +68,7 @@ packets and a browser-side jitter buffer.
 - `/ws/control` sends session config and answers clock sync pings.
 - The server loads `.flac` and `.wav` files in `media/tracks` as a sorted
   playlist.
-- `/ws/audio` sends timestamped 48 kHz stereo PCM float32 packets from that
+- `/ws/audio` sends timestamped 48 kHz stereo 16-bit PCM packets from that
   playlist and loops the playlist.
 - Browser worker receives and parses audio packets.
 - AudioWorklet plays packets by stream sample timeline through a jitter buffer.

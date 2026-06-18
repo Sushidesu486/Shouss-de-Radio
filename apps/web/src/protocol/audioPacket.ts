@@ -1,6 +1,6 @@
 export const AUDIO_PACKET_HEADER_LEN = 54;
 
-export type AudioCodec = "pcm_f32" | "opus";
+export type AudioCodec = "pcm_f32" | "pcm_s16" | "opus";
 
 export type AudioPacketHeader = {
   codec: AudioCodec;
@@ -28,6 +28,10 @@ const codecFromWire = (value: number): AudioCodec | null => {
 
   if (value === 2) {
     return "opus";
+  }
+
+  if (value === 3) {
+    return "pcm_s16";
   }
 
   return null;

@@ -94,7 +94,7 @@ The current audio milestone uses PCM packets decoded from the sorted `.flac` and
 stereo
 20 ms packet
 960 frames per packet
-codec = pcm_f32
+codec = pcm_s16
 ```
 
 The binary header uses big-endian integer fields:
@@ -121,14 +121,18 @@ magic = "SRAD"
 version = 1
 codec pcm_f32 = 1
 codec opus = 2
+codec pcm_s16 = 3
 header length = 54 bytes
 ```
 
-PCM payload uses interleaved little-endian `float32` samples:
+Current PCM payload uses interleaved little-endian signed 16-bit samples:
 
 ```text
 left0, right0, left1, right1, ...
 ```
+
+The browser worker converts `pcm_s16` payloads to Float32Array before passing
+them to the AudioWorklet. Older `pcm_f32` payloads are still parseable.
 
 The browser must schedule by `firstSampleIndex` and
 `serverPresentationTimeNs`, not by receive time.
