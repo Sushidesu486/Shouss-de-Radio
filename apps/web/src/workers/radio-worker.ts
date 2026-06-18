@@ -11,6 +11,7 @@ let controlSocket: WebSocket | null = null;
 let audioSocket: WebSocket | null = null;
 let pingTimer: number | undefined;
 let deviceId = "";
+let deviceName = "";
 let audioEnabled = false;
 let targetLatencyMs = 8_000;
 let deviceOutputOffsetMs = 0;
@@ -91,6 +92,24 @@ const send = (message: ControlMessage) => {
   if (controlSocket?.readyState === WebSocket.OPEN) {
     controlSocket.send(JSON.stringify(message));
   }
+};
+
+const normalizedDeviceName = () => {
+  const name = deviceName.trim();
+  return name.length > 0 ? name : null;
+};
+
+const sendHello = () => {
+  if (deviceId.length === 0) {
+    return;
+  }
+
+  send({
+    type: "hello",
+    deviceId,
+    deviceName: normalizedDeviceName(),
+    userAgent: navigator.userAgent
+  });
 };
 
 const resetAudioStats = () => {
@@ -258,11 +277,7 @@ const connect = () => {
 
   controlSocket.addEventListener("open", () => {
     post({ type: "connection", state: "connected" });
-    send({
-      type: "hello",
-      deviceId,
-      userAgent: navigator.userAgent
-    });
+    sendHello();
     startClockSync();
     startAudioSocket();
   });
@@ -339,6 +354,7 @@ const connect = () => {
 self.addEventListener("message", (event: MessageEvent<WorkerCommand>) => {
   if (event.data.type === "connect") {
     deviceId = event.data.deviceId;
+    deviceName = event.data.deviceName;
     connect();
   }
 
@@ -363,6 +379,11 @@ self.addEventListener("message", (event: MessageEvent<WorkerCommand>) => {
 
   if (event.data.type === "setDeviceOffset") {
     deviceOutputOffsetMs = event.data.offsetMs;
+  }
+
+  if (event.data.type === "setDeviceName") {
+    deviceName = event.data.deviceName;
+    sendHello();
   }
 
   if (event.data.type === "reportClientStatus") {

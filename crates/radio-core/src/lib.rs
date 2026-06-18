@@ -138,6 +138,7 @@ pub fn encode_audio_packet(header: &AudioPacketHeader, payload: &[u8]) -> Vec<u8
 pub enum ControlMessage {
     Hello {
         device_id: String,
+        device_name: Option<String>,
         user_agent: String,
     },
     ClockPing {

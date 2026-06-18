@@ -2,6 +2,7 @@ export type ControlMessage =
   | {
       type: "hello";
       deviceId: string;
+      deviceName: string | null;
       userAgent: string;
     }
   | {
@@ -51,9 +52,10 @@ export type ControlMessage =
     };
 
 export type WorkerCommand =
-  | { type: "connect"; deviceId: string }
+  | { type: "connect"; deviceId: string; deviceName: string }
   | { type: "disconnect" }
   | { type: "setAudioEnabled"; enabled: boolean }
+  | { type: "setDeviceName"; deviceName: string }
   | { type: "setDeviceOffset"; offsetMs: number }
   | {
       type: "reportClientStatus";

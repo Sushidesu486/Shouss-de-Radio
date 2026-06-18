@@ -40,6 +40,8 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
+const MAX_DEVICE_NAME_CHARS: usize = 40;
+
 struct AppState {
     control_tx: broadcast::Sender<ControlMessage>,
     stream_started_at_ns: i128,
@@ -82,6 +84,7 @@ struct AudienceCounterGuard {
 struct ClientDiagnostic {
     id: usize,
     device_id: Option<String>,
+    device_name: Option<String>,
     user_agent: Option<String>,
     connected_at_ms: f64,
     last_seen_ms: f64,
@@ -276,10 +279,17 @@ async fn handle_control_message(
         }
         Ok(ControlMessage::Hello {
             device_id,
+            device_name,
             user_agent,
         }) => {
-            state.update_client_identity(client_id, device_id.clone(), user_agent);
-            info!(%device_id, "device connected");
+            let device_name = normalize_device_name(device_name);
+            state.update_client_identity(
+                client_id,
+                device_id.clone(),
+                device_name.clone(),
+                user_agent,
+            );
+            info!(%device_id, device_name = ?device_name, "device connected");
         }
         Ok(ControlMessage::ClientStatus {
             rtt_ms,
@@ -429,10 +439,17 @@ impl AppState {
         let _ = self.control_tx.send(self.audience_stats_message());
     }
 
-    fn update_client_identity(&self, client_id: usize, device_id: String, user_agent: String) {
+    fn update_client_identity(
+        &self,
+        client_id: usize,
+        device_id: String,
+        device_name: Option<String>,
+        user_agent: String,
+    ) {
         let mut clients = self.clients.lock().expect("clients mutex poisoned");
         if let Some(client) = clients.get_mut(&client_id) {
             client.device_id = Some(device_id);
+            client.device_name = device_name;
             client.user_agent = Some(user_agent);
             client.last_seen_ms = unix_time_ms();
         }
@@ -512,6 +529,7 @@ impl ClientDiagnostic {
         Self {
             id,
             device_id: None,
+            device_name: None,
             user_agent: None,
             connected_at_ms: now_ms,
             last_seen_ms: now_ms,
@@ -532,6 +550,17 @@ impl ClientDiagnostic {
 
 fn saturating_usize_to_u32(value: usize) -> u32 {
     value.try_into().unwrap_or(u32::MAX)
+}
+
+fn normalize_device_name(device_name: Option<String>) -> Option<String> {
+    device_name.and_then(|name| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(MAX_DEVICE_NAME_CHARS).collect())
+        }
+    })
 }
 
 fn unix_time_ms() -> f64 {

@@ -21,6 +21,7 @@ Messages use a `type` field with camelCase names.
 {
   "type": "hello",
   "deviceId": "device-uuid",
+  "deviceName": "MacBook Left",
   "userAgent": "browser user agent"
 }
 ```
@@ -83,6 +84,8 @@ GET /api/clients
 
 Returns the current in-memory status for connected control clients. This is used
 to compare multi-device playback quality while tuning for 10 ms-class sync.
+Each client entry includes `deviceName` when the browser has configured a custom
+display name.
 
 ## Audio Packet v0
 

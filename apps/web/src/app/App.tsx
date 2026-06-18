@@ -61,6 +61,7 @@ type SyncQualityState = {
 type ClientDiagnostic = {
   id: number;
   deviceId: string | null;
+  deviceName: string | null;
   userAgent: string | null;
   connectedAtMs: number;
   lastSeenMs: number;
@@ -94,6 +95,7 @@ type ThemeMode = "light" | "dark";
 
 const MAX_NETWORK_SAMPLES = 240;
 const MAX_SYNC_QUALITY_SAMPLES = 240;
+const MAX_DEVICE_NAME_CHARS = 40;
 
 const createDeviceId = () => {
   const existing = localStorage.getItem("radio.deviceId");
@@ -119,6 +121,14 @@ const createDeviceOutputOffsetMs = () => {
   const stored = Number(localStorage.getItem("radio.deviceOutputOffsetMs"));
   return Number.isFinite(stored) ? stored : 0;
 };
+
+const limitDeviceName = (value: string) =>
+  Array.from(value).slice(0, MAX_DEVICE_NAME_CHARS).join("");
+
+const normalizeDeviceName = (value: string) => limitDeviceName(value.trim());
+
+const createDeviceName = () =>
+  normalizeDeviceName(localStorage.getItem("radio.deviceName") ?? "");
 
 const nowMs = () => performance.timeOrigin + performance.now();
 
@@ -171,6 +181,19 @@ const connectionLabel = (state: ConnectionState) => {
     default:
       return "未连接";
   }
+};
+
+const clientDisplayName = (client: ClientDiagnostic, currentDeviceId: string) => {
+  const name = normalizeDeviceName(client.deviceName ?? "");
+  if (name.length > 0) {
+    return name;
+  }
+
+  if (client.deviceId === currentDeviceId) {
+    return "本机";
+  }
+
+  return client.deviceId?.slice(0, 8) ?? `client ${client.id}`;
 };
 
 const pushSample = (
@@ -252,6 +275,7 @@ export function App() {
   });
   const [networkSamples, setNetworkSamples] = useState<NetworkSample[]>([]);
   const [themeMode, setThemeMode] = useState<ThemeMode>(createThemeMode);
+  const [deviceName, setDeviceName] = useState(createDeviceName);
   const [deviceOutputOffsetMs, setDeviceOutputOffsetMs] = useState(
     createDeviceOutputOffsetMs
   );
@@ -285,6 +309,15 @@ export function App() {
   }, [clock]);
 
   useEffect(() => {
+    const normalized = normalizeDeviceName(deviceName);
+    localStorage.setItem("radio.deviceName", normalized);
+    workerRef.current?.postMessage({
+      type: "setDeviceName",
+      deviceName: normalized
+    } satisfies WorkerCommand);
+  }, [deviceName]);
+
+  useEffect(() => {
     deviceOutputOffsetRef.current = deviceOutputOffsetMs;
     localStorage.setItem("radio.deviceOutputOffsetMs", `${deviceOutputOffsetMs}`);
     workerRef.current?.postMessage({
@@ -301,6 +334,10 @@ export function App() {
     worker.postMessage({
       type: "setDeviceOffset",
       offsetMs: deviceOutputOffsetMs
+    } satisfies WorkerCommand);
+    worker.postMessage({
+      type: "setDeviceName",
+      deviceName: normalizeDeviceName(deviceName)
     } satisfies WorkerCommand);
 
     worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
@@ -473,7 +510,11 @@ export function App() {
   };
 
   const connect = () => {
-    postWorker({ type: "connect", deviceId });
+    postWorker({
+      type: "connect",
+      deviceId,
+      deviceName: normalizeDeviceName(deviceName)
+    });
   };
 
   const disconnect = () => {
@@ -583,6 +624,7 @@ export function App() {
   const trackTitle = track?.title ?? "等待曲目";
   const trackArtist = track?.artist ?? "Shouss de Radio";
   const streamStatus = streamEnabled ? "正在收听" : "待机";
+  const currentDeviceName = normalizeDeviceName(deviceName);
   deviceOutputOffsetRef.current = deviceOutputOffsetMs;
 
   return (
@@ -644,7 +686,7 @@ export function App() {
         <MetricCard
           label="连接"
           value={connectionLabel(connectionState)}
-          detail={`设备 ${deviceId.slice(0, 8)}`}
+          detail={currentDeviceName || `设备 ${deviceId.slice(0, 8)}`}
         />
         <MetricCard
           label="在线"
@@ -765,11 +807,7 @@ export function App() {
               clientDiagnostics.map((client) => (
                 <div className="client-row" key={client.id}>
                   <div className="client-main">
-                    <strong>
-                      {client.deviceId === deviceId
-                        ? "本机"
-                        : client.deviceId?.slice(0, 8) ?? `client ${client.id}`}
-                    </strong>
+                    <strong>{clientDisplayName(client, deviceId)}</strong>
                     <span>
                       {client.deviceOutputOffsetMs === null
                         ? "offset -"
@@ -803,6 +841,18 @@ export function App() {
         <article className="panel calibration-panel">
           <h2>Device Calibration</h2>
           <p className="panel-note">正数延后本设备，负数提前本设备。</p>
+          <label className="device-name-control">
+            <span>设备名称</span>
+            <input
+              type="text"
+              value={deviceName}
+              maxLength={MAX_DEVICE_NAME_CHARS}
+              placeholder="本机"
+              onChange={(event) =>
+                setDeviceName(limitDeviceName(event.currentTarget.value))
+              }
+            />
+          </label>
           <label className="pulse-toggle">
             <input
               type="checkbox"
