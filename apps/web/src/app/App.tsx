@@ -15,6 +15,21 @@ type SessionState = {
   sceneVersion: number | null;
 };
 
+type TrackState = {
+  title: string;
+  artist: string | null;
+  filename: string;
+  durationMs: number;
+  sampleRateHz: number;
+  channelCount: number;
+};
+
+type AudienceState = {
+  connectedClients: number;
+  activeListeners: number;
+  audioSockets: number;
+};
+
 type AudioStatsState = {
   packets: number;
   kilobitsPerSecond: number | null;
@@ -22,7 +37,19 @@ type AudioStatsState = {
   lastFirstSampleIndex: number | null;
   lastPayloadBytes: number | null;
   playoutLeadMs: number | null;
+  packetGapMs: number | null;
+  jitterMs: number | null;
 };
+
+type NetworkSample = {
+  at: number;
+  rttMs: number | null;
+  jitterMs: number | null;
+  leadDriftMs: number | null;
+  kilobitsPerSecond: number | null;
+};
+
+const MAX_NETWORK_SAMPLES = 240;
 
 const createDeviceId = () => {
   const existing = localStorage.getItem("radio.deviceId");
@@ -35,11 +62,72 @@ const createDeviceId = () => {
   return value;
 };
 
+const formatMs = (value: number | null, digits = 1) => {
+  if (value === null || Number.isNaN(value)) {
+    return "-";
+  }
+
+  return `${value.toFixed(digits)} ms`;
+};
+
+const formatNumber = (value: number | null) => {
+  if (value === null || Number.isNaN(value)) {
+    return "-";
+  }
+
+  return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+};
+
+const formatDuration = (valueMs: number | null) => {
+  if (valueMs === null || Number.isNaN(valueMs)) {
+    return "-";
+  }
+
+  const totalSeconds = Math.max(0, Math.round(valueMs / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+};
+
+const connectionLabel = (state: ConnectionState) => {
+  switch (state) {
+    case "connected":
+      return "已连接";
+    case "connecting":
+      return "连接中";
+    case "closed":
+      return "已断开";
+    case "error":
+      return "错误";
+    case "idle":
+    default:
+      return "未连接";
+  }
+};
+
+const pushSample = (
+  samples: NetworkSample[],
+  patch: Omit<NetworkSample, "at"> & { at?: number }
+) => {
+  const previous = samples.at(-1);
+  const next: NetworkSample = {
+    at: patch.at ?? performance.now(),
+    rttMs: patch.rttMs ?? previous?.rttMs ?? null,
+    jitterMs: patch.jitterMs ?? previous?.jitterMs ?? null,
+    leadDriftMs: patch.leadDriftMs ?? previous?.leadDriftMs ?? null,
+    kilobitsPerSecond:
+      patch.kilobitsPerSecond ?? previous?.kilobitsPerSecond ?? null
+  };
+
+  return [...samples, next].slice(-MAX_NETWORK_SAMPLES);
+};
+
 export function App() {
   const workerRef = useRef<Worker | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const streamEnabledRef = useRef(false);
+  const targetLatencyRef = useRef<number | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [clock, setClock] = useState<ClockState>({
     rttMs: null,
@@ -51,6 +139,12 @@ export function App() {
     sampleRateHz: null,
     sceneVersion: null
   });
+  const [track, setTrack] = useState<TrackState | null>(null);
+  const [audience, setAudience] = useState<AudienceState>({
+    connectedClients: 0,
+    activeListeners: 0,
+    audioSockets: 0
+  });
   const [audioReady, setAudioReady] = useState(false);
   const [streamEnabled, setStreamEnabled] = useState(false);
   const [audioStats, setAudioStats] = useState<AudioStatsState>({
@@ -59,8 +153,11 @@ export function App() {
     lastSeq: null,
     lastFirstSampleIndex: null,
     lastPayloadBytes: null,
-    playoutLeadMs: null
+    playoutLeadMs: null,
+    packetGapMs: null,
+    jitterMs: null
   });
+  const [networkSamples, setNetworkSamples] = useState<NetworkSample[]>([]);
 
   const deviceId = useMemo(createDeviceId, []);
 
@@ -71,52 +168,104 @@ export function App() {
     workerRef.current = worker;
 
     worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
-      if (event.data.type === "audioPacket") {
+      const message = event.data;
+
+      if (message.type === "audioPacket") {
         if (streamEnabledRef.current && workletNodeRef.current) {
           workletNodeRef.current.port.postMessage(
             {
               type: "pcmPacket",
-              payload: event.data.payload,
-              frameCount: event.data.frameCount,
-              channelCount: event.data.channelCount,
-              firstSampleIndex: event.data.firstSampleIndex,
-              serverPresentationTimeNs: event.data.serverPresentationTimeNs
+              payload: message.payload,
+              frameCount: message.frameCount,
+              channelCount: message.channelCount,
+              firstSampleIndex: message.firstSampleIndex,
+              serverPresentationTimeNs: message.serverPresentationTimeNs
             },
-            [event.data.payload]
+            [message.payload]
           );
         }
         return;
       }
 
-      if (event.data.type === "connection") {
-        setConnectionState(event.data.state);
+      if (message.type === "connection") {
+        setConnectionState(message.state);
+        if (message.state === "idle" || message.state === "closed") {
+          setStreamEnabled(false);
+        }
       }
 
-      if (event.data.type === "clock") {
+      if (message.type === "clock") {
+        const rttMs = message.rttMs;
+
         setClock({
-          rttMs: event.data.rttMs,
-          clockOffsetMs: event.data.clockOffsetMs,
-          sampleCount: event.data.sampleCount
+          rttMs,
+          clockOffsetMs: message.clockOffsetMs,
+          sampleCount: message.sampleCount
         });
+        setNetworkSamples((samples) =>
+          pushSample(samples, {
+            rttMs,
+            jitterMs: null,
+            leadDriftMs: null,
+            kilobitsPerSecond: null
+          })
+        );
       }
 
-      if (event.data.type === "session") {
+      if (message.type === "session") {
+        targetLatencyRef.current = message.targetLatencyMs;
         setSession({
-          targetLatencyMs: event.data.targetLatencyMs,
-          sampleRateHz: event.data.sampleRateHz,
-          sceneVersion: event.data.sceneVersion
+          targetLatencyMs: message.targetLatencyMs,
+          sampleRateHz: message.sampleRateHz,
+          sceneVersion: message.sceneVersion
         });
       }
 
-      if (event.data.type === "audio") {
-        setAudioStats({
-          packets: event.data.packets,
-          kilobitsPerSecond: event.data.kilobitsPerSecond,
-          lastSeq: event.data.lastSeq,
-          lastFirstSampleIndex: event.data.lastFirstSampleIndex,
-          lastPayloadBytes: event.data.lastPayloadBytes,
-          playoutLeadMs: event.data.playoutLeadMs
+      if (message.type === "track") {
+        setTrack({
+          title: message.title,
+          artist: message.artist,
+          filename: message.filename,
+          durationMs: message.durationMs,
+          sampleRateHz: message.sampleRateHz,
+          channelCount: message.channelCount
         });
+      }
+
+      if (message.type === "audience") {
+        setAudience({
+          connectedClients: message.connectedClients,
+          activeListeners: message.activeListeners,
+          audioSockets: message.audioSockets
+        });
+      }
+
+      if (message.type === "audio") {
+        const jitterMs = message.jitterMs;
+        const kilobitsPerSecond = message.kilobitsPerSecond;
+        const leadDriftMs =
+          message.playoutLeadMs === null || targetLatencyRef.current === null
+            ? null
+            : message.playoutLeadMs - targetLatencyRef.current;
+
+        setAudioStats({
+          packets: message.packets,
+          kilobitsPerSecond,
+          lastSeq: message.lastSeq,
+          lastFirstSampleIndex: message.lastFirstSampleIndex,
+          lastPayloadBytes: message.lastPayloadBytes,
+          playoutLeadMs: message.playoutLeadMs,
+          packetGapMs: message.packetGapMs,
+          jitterMs
+        });
+        setNetworkSamples((samples) =>
+          pushSample(samples, {
+            rttMs: null,
+            jitterMs,
+            leadDriftMs,
+            kilobitsPerSecond
+          })
+        );
       }
     };
 
@@ -143,10 +292,18 @@ export function App() {
   };
 
   const disconnect = () => {
+    setStreamEnabled(false);
     postWorker({ type: "disconnect" });
   };
 
-  const startAudio = async () => {
+  const ensureAudio = async () => {
+    if (audioContextRef.current && workletNodeRef.current) {
+      if (audioContextRef.current.state !== "running") {
+        await audioContextRef.current.resume();
+      }
+      return;
+    }
+
     const audioContext = new AudioContext({ sampleRate: 48_000 });
     await audioContext.audioWorklet.addModule(
       new URL("../audio/radio-worklet.js", import.meta.url)
@@ -164,75 +321,118 @@ export function App() {
     setAudioReady(true);
   };
 
-  const formatMs = (value: number | null) => {
-    if (value === null || Number.isNaN(value)) {
-      return "-";
+  const startListening = async () => {
+    await ensureAudio();
+
+    if (connectionState !== "connected" && connectionState !== "connecting") {
+      connect();
     }
 
-    return `${value.toFixed(2)} ms`;
+    setStreamEnabled(true);
+    postWorker({ type: "setAudioEnabled", enabled: true });
   };
 
-  const formatNumber = (value: number | null) => {
-    if (value === null || Number.isNaN(value)) {
-      return "-";
-    }
-
-    return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  const pauseListening = () => {
+    setStreamEnabled(false);
+    postWorker({ type: "setAudioEnabled", enabled: false });
   };
+
+  const leadDriftMs =
+    audioStats.playoutLeadMs === null || session.targetLatencyMs === null
+      ? null
+      : audioStats.playoutLeadMs - session.targetLatencyMs;
+  const trackTitle = track?.title ?? "等待曲目";
+  const trackArtist = track?.artist ?? "Shouss de Radio";
+  const streamStatus = streamEnabled ? "正在收听" : "待机";
 
   return (
     <main className="shell">
-      <section className="toolbar">
+      <section className="topbar">
         <div>
+          <p className="eyebrow">公网同步电台</p>
           <h1>Shouss de Radio</h1>
-          <p>公网同步电台实验台</p>
         </div>
-        <div className="actions">
+        <div className="topbar-actions">
           <button onClick={connect} disabled={connectionState === "connected"}>
-            Connect
+            连接
           </button>
-          <button onClick={disconnect} disabled={connectionState !== "connected"}>
-            Disconnect
-          </button>
-          <button onClick={startAudio} disabled={audioReady}>
-            Start Audio
+          <button onClick={disconnect} disabled={connectionState === "idle"}>
+            断开
           </button>
         </div>
       </section>
 
-      <section className="status-grid">
-        <article className="panel">
-          <h2>Connection</h2>
-          <dl>
-            <div>
-              <dt>State</dt>
-              <dd>{connectionState}</dd>
-            </div>
-            <div>
-              <dt>Device</dt>
-              <dd>{deviceId.slice(0, 8)}</dd>
-            </div>
-          </dl>
-        </article>
+      <section className="player-panel">
+        <div className="track-block">
+          <p className="eyebrow">{streamStatus}</p>
+          <h2>{trackTitle}</h2>
+          <p className="artist">{trackArtist}</p>
+          <div className="track-meta" aria-label="Track metadata">
+            <span>{formatDuration(track?.durationMs ?? null)}</span>
+            <span>{track?.sampleRateHz ?? session.sampleRateHz ?? "-"} Hz</span>
+            <span>{track?.channelCount ?? "-"} ch</span>
+            <span>{track?.filename ?? "-"}</span>
+          </div>
+        </div>
 
-        <article className="panel">
-          <h2>Clock</h2>
-          <dl>
-            <div>
-              <dt>RTT</dt>
-              <dd>{formatMs(clock.rttMs)}</dd>
-            </div>
-            <div>
-              <dt>Offset</dt>
-              <dd>{formatMs(clock.clockOffsetMs)}</dd>
-            </div>
-            <div>
-              <dt>Samples</dt>
-              <dd>{clock.sampleCount}</dd>
-            </div>
-          </dl>
-        </article>
+        <div className="listen-block">
+          <div className="listener-count">
+            <span>{audience.activeListeners}</span>
+            <p>正在收听</p>
+          </div>
+          <button
+            className="primary-action"
+            onClick={streamEnabled ? pauseListening : startListening}
+            disabled={connectionState === "connecting"}
+          >
+            {streamEnabled ? "暂停" : "收听"}
+          </button>
+        </div>
+      </section>
 
+      <section className="overview-grid">
+        <MetricCard
+          label="连接"
+          value={connectionLabel(connectionState)}
+          detail={`设备 ${deviceId.slice(0, 8)}`}
+        />
+        <MetricCard
+          label="在线"
+          value={audience.connectedClients.toString()}
+          detail={`${audience.audioSockets} 条音频流`}
+        />
+        <MetricCard
+          label="RTT"
+          value={formatMs(clock.rttMs)}
+          detail={`offset ${formatMs(clock.clockOffsetMs)}`}
+        />
+        <MetricCard
+          label="码率"
+          value={
+            audioStats.kilobitsPerSecond === null
+              ? "-"
+              : `${audioStats.kilobitsPerSecond.toFixed(1)} kbps`
+          }
+          detail={`jitter ${formatMs(audioStats.jitterMs)}`}
+        />
+      </section>
+
+      <section className="network-panel">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Network</p>
+            <h2>网络波动</h2>
+          </div>
+          <div className="legend">
+            <span className="legend-rtt">RTT</span>
+            <span className="legend-jitter">Jitter</span>
+            <span className="legend-lead">Lead Drift</span>
+          </div>
+        </div>
+        <NetworkChart samples={networkSamples} />
+      </section>
+
+      <section className="debug-grid">
         <article className="panel">
           <h2>Session</h2>
           <dl>
@@ -250,36 +450,23 @@ export function App() {
               <dt>Scene</dt>
               <dd>{session.sceneVersion ?? "-"}</dd>
             </div>
+            <div>
+              <dt>Clock Samples</dt>
+              <dd>{clock.sampleCount}</dd>
+            </div>
           </dl>
-        </article>
-
-        <article className="panel control-panel">
-          <h2>Audio</h2>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={streamEnabled}
-              disabled={!audioReady}
-              onChange={(event) => setStreamEnabled(event.target.checked)}
-            />
-            <span>Play Stream</span>
-          </label>
         </article>
 
         <article className="panel">
           <h2>Audio Stream</h2>
           <dl>
             <div>
-              <dt>Packets</dt>
-              <dd>{audioStats.packets}</dd>
+              <dt>Audio</dt>
+              <dd>{audioReady ? "ready" : "locked"}</dd>
             </div>
             <div>
-              <dt>Rate</dt>
-              <dd>
-                {audioStats.kilobitsPerSecond === null
-                  ? "-"
-                  : `${audioStats.kilobitsPerSecond.toFixed(1)} kbps`}
-              </dd>
+              <dt>Packets</dt>
+              <dd>{audioStats.packets}</dd>
             </div>
             <div>
               <dt>Seq</dt>
@@ -298,12 +485,198 @@ export function App() {
               </dd>
             </div>
             <div>
-              <dt>Lead</dt>
-              <dd>{formatMs(audioStats.playoutLeadMs)}</dd>
+              <dt>Lead Drift</dt>
+              <dd>{formatMs(leadDriftMs)}</dd>
             </div>
           </dl>
         </article>
       </section>
     </main>
   );
+}
+
+function MetricCard({
+  label,
+  value,
+  detail
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <article className="metric-card">
+      <p>{label}</p>
+      <strong>{value}</strong>
+      <span>{detail}</span>
+    </article>
+  );
+}
+
+function NetworkChart({ samples }: { samples: NetworkSample[] }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    const ratio = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(320, rect.width);
+    const height = Math.max(240, rect.height);
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+
+    context.fillStyle = "#fbfcfa";
+    context.fillRect(0, 0, width, height);
+
+    const paddingLeft = 58;
+    const paddingRight = 16;
+    const paddingTop = 16;
+    const paddingBottom = 18;
+    const plotWidth = width - paddingLeft - paddingRight;
+    const plotHeight = height - paddingTop - paddingBottom;
+    const laneHeight = plotHeight / 3;
+
+    const lanes = [
+      {
+        label: "RTT",
+        unit: "ms",
+        color: "#16736b",
+        values: samples.map((sample) => sample.rttMs),
+        map: (value: number, max: number) => 1 - value / max,
+        scale: maxOf(samples.map((sample) => sample.rttMs), 80)
+      },
+      {
+        label: "Jitter",
+        unit: "ms",
+        color: "#c4513c",
+        values: samples.map((sample) => sample.jitterMs),
+        map: (value: number, max: number) => 1 - value / max,
+        scale: maxOf(samples.map((sample) => sample.jitterMs), 40)
+      },
+      {
+        label: "Lead",
+        unit: "ms",
+        color: "#b78311",
+        values: samples.map((sample) => sample.leadDriftMs),
+        map: (value: number, max: number) => 0.5 - value / (max * 2),
+        scale: maxAbsOf(samples.map((sample) => sample.leadDriftMs), 120)
+      }
+    ];
+
+    context.strokeStyle = "#d8dfd8";
+    context.lineWidth = 1;
+    for (let index = 0; index <= 3; index += 1) {
+      const y = paddingTop + index * laneHeight;
+      context.beginPath();
+      context.moveTo(paddingLeft, y);
+      context.lineTo(width - paddingRight, y);
+      context.stroke();
+    }
+
+    context.font =
+      '12px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    context.textBaseline = "middle";
+
+    lanes.forEach((lane, laneIndex) => {
+      const laneTop = paddingTop + laneIndex * laneHeight;
+      const laneCenter = laneTop + laneHeight / 2;
+      const latest = latestValue(lane.values);
+
+      context.fillStyle = "#66746c";
+      context.fillText(lane.label, 12, laneCenter - 8);
+      context.fillText(
+        latest === null ? "-" : `${latest.toFixed(1)} ${lane.unit}`,
+        12,
+        laneCenter + 10
+      );
+
+      if (lane.label === "Lead") {
+        context.strokeStyle = "#e4d8b7";
+        context.beginPath();
+        context.moveTo(paddingLeft, laneCenter);
+        context.lineTo(width - paddingRight, laneCenter);
+        context.stroke();
+      }
+
+      context.strokeStyle = lane.color;
+      context.lineWidth = 2;
+      context.beginPath();
+
+      let started = false;
+      lane.values.forEach((value, sampleIndex) => {
+        if (value === null) {
+          return;
+        }
+
+        const x =
+          paddingLeft +
+          (samples.length <= 1
+            ? plotWidth
+            : (sampleIndex / (samples.length - 1)) * plotWidth);
+        const normalized = clamp(lane.map(value, lane.scale), 0.08, 0.92);
+        const y = laneTop + normalized * laneHeight;
+
+        if (!started) {
+          context.moveTo(x, y);
+          started = true;
+        } else {
+          context.lineTo(x, y);
+        }
+      });
+
+      context.stroke();
+    });
+  }, [samples]);
+
+  return <canvas ref={canvasRef} className="network-canvas" aria-label="Network fluctuation" />;
+}
+
+function latestValue(values: Array<number | null>) {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    if (value !== null && Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function maxOf(values: Array<number | null>, floor: number) {
+  const max = values.reduce<number>((result, value) => {
+    if (value === null || !Number.isFinite(value)) {
+      return result;
+    }
+
+    return Math.max(result, value);
+  }, floor);
+
+  return Math.max(floor, max * 1.2);
+}
+
+function maxAbsOf(values: Array<number | null>, floor: number) {
+  const max = values.reduce<number>((result, value) => {
+    if (value === null || !Number.isFinite(value)) {
+      return result;
+    }
+
+    return Math.max(result, Math.abs(value));
+  }, floor);
+
+  return Math.max(floor, max * 1.2);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
