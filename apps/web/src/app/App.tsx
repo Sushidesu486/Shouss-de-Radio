@@ -45,6 +45,7 @@ type SyncStatsState = {
   syncErrorMs: number | null;
   bufferLeadMs: number | null;
   playbackRatio: number | null;
+  anchorErrorMs: number | null;
   underruns: number;
   lateDrops: number;
   resyncs: number;
@@ -198,10 +199,12 @@ export function App() {
   const [deviceOutputOffsetMs, setDeviceOutputOffsetMs] = useState(
     createDeviceOutputOffsetMs
   );
+  const [calibrationPulseEnabled, setCalibrationPulseEnabled] = useState(false);
   const [syncStats, setSyncStats] = useState<SyncStatsState>({
     syncErrorMs: null,
     bufferLeadMs: null,
     playbackRatio: null,
+    anchorErrorMs: null,
     underruns: 0,
     lateDrops: 0,
     resyncs: 0,
@@ -360,6 +363,13 @@ export function App() {
     });
   }, [streamEnabled]);
 
+  useEffect(() => {
+    workletNodeRef.current?.port.postMessage({
+      type: "calibrationPulse",
+      enabled: calibrationPulseEnabled
+    });
+  }, [calibrationPulseEnabled]);
+
   const postWorker = (command: WorkerCommand) => {
     workerRef.current?.postMessage(command);
   };
@@ -393,21 +403,35 @@ export function App() {
     });
     node.port.onmessage = (event) => {
       if (event.data.type === "syncStats") {
+        const syncErrorMs = event.data.syncErrorMs;
         setSyncStats({
-          syncErrorMs: event.data.syncErrorMs,
+          syncErrorMs,
           bufferLeadMs: event.data.bufferLeadMs,
           playbackRatio: event.data.playbackRatio,
+          anchorErrorMs: event.data.anchorErrorMs,
           underruns: event.data.underruns,
           lateDrops: event.data.lateDrops,
           resyncs: event.data.resyncs,
           queuedPackets: event.data.queuedPackets
         });
+        setNetworkSamples((samples) =>
+          pushSample(samples, {
+            rttMs: null,
+            jitterMs: null,
+            leadDriftMs: syncErrorMs,
+            kilobitsPerSecond: null
+          })
+        );
       }
     };
     node.connect(audioContext.destination);
 
     audioContextRef.current = audioContext;
     workletNodeRef.current = node;
+    node.port.postMessage({
+      type: "calibrationPulse",
+      enabled: calibrationPulseEnabled
+    });
     setAudioReady(true);
   };
 
@@ -537,7 +561,7 @@ export function App() {
           <div className="legend">
             <span className="legend-rtt">RTT</span>
             <span className="legend-jitter">Jitter</span>
-            <span className="legend-lead">Lead Drift</span>
+            <span className="legend-lead">Sync Error</span>
           </div>
         </div>
         <NetworkChart samples={networkSamples} themeMode={themeMode} />
@@ -605,6 +629,16 @@ export function App() {
         <article className="panel calibration-panel">
           <h2>Device Calibration</h2>
           <p className="panel-note">正数延后本设备，负数提前本设备。</p>
+          <label className="pulse-toggle">
+            <input
+              type="checkbox"
+              checked={calibrationPulseEnabled}
+              onChange={(event) =>
+                setCalibrationPulseEnabled(event.currentTarget.checked)
+              }
+            />
+            <span>校准脉冲</span>
+          </label>
           <label className="offset-control">
             <span>Offset</span>
             <input
@@ -636,6 +670,10 @@ export function App() {
             <span>ms</span>
           </div>
           <dl>
+            <div>
+              <dt>Anchor Error</dt>
+              <dd>{formatMs(syncStats.anchorErrorMs)}</dd>
+            </div>
             <div>
               <dt>Underruns</dt>
               <dd>{syncStats.underruns}</dd>
@@ -741,7 +779,7 @@ function NetworkChart({
         scale: maxOf(samples.map((sample) => sample.jitterMs), 40)
       },
       {
-        label: "Lead",
+        label: "Sync",
         unit: "ms",
         color: chartLead,
         values: samples.map((sample) => sample.leadDriftMs),
@@ -777,7 +815,7 @@ function NetworkChart({
         laneCenter + 10
       );
 
-      if (lane.label === "Lead") {
+      if (lane.label === "Sync") {
         context.strokeStyle = chartLeadZero;
         context.beginPath();
         context.moveTo(paddingLeft, laneCenter);

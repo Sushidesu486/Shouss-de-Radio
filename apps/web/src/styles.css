@@ -442,6 +442,23 @@ dd {
   flex-direction: column;
 }
 
+.pulse-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 16px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pulse-toggle input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .offset-control {
   display: grid;
   gap: 10px;
