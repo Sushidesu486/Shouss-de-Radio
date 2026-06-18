@@ -13,6 +13,7 @@ let pingTimer: number | undefined;
 let deviceId = "";
 let audioEnabled = false;
 let targetLatencyMs = 8_000;
+let deviceOutputOffsetMs = 0;
 const offsetSamples: Array<{ rttMs: number; clockOffsetMs: number }> = [];
 let bestClockOffsetMs: number | null = null;
 
@@ -110,14 +111,17 @@ const postAudioStats = () => {
   });
 };
 
+const sendClockPing = () => {
+  send({
+    type: "clockPing",
+    clientSendTimeMs: nowMs()
+  });
+};
+
 const startClockSync = () => {
   self.clearInterval(pingTimer);
-  pingTimer = self.setInterval(() => {
-    send({
-      type: "clockPing",
-      clientSendTimeMs: nowMs()
-    });
-  }, 1_000);
+  sendClockPing();
+  pingTimer = self.setInterval(sendClockPing, 1_000);
 };
 
 const stopClockSync = () => {
@@ -171,10 +175,17 @@ const startAudioSocket = () => {
     const presentationTimeMs = Number(packet.header.serverPresentationTimeNs / 1_000_000n);
     const estimatedServerNowMs =
       bestClockOffsetMs === null ? null : receiveTimeMs + bestClockOffsetMs;
+    const targetPlaybackTimeMs =
+      bestClockOffsetMs === null
+        ? null
+        : presentationTimeMs + targetLatencyMs + deviceOutputOffsetMs - bestClockOffsetMs;
     const playoutLeadMs =
       estimatedServerNowMs === null
         ? null
-        : presentationTimeMs + targetLatencyMs - estimatedServerNowMs;
+        : presentationTimeMs +
+          targetLatencyMs +
+          deviceOutputOffsetMs -
+          estimatedServerNowMs;
 
     audioStats.packets += 1;
     audioStats.bytes += event.data.byteLength;
@@ -193,7 +204,8 @@ const startAudioSocket = () => {
         frameCount: packet.header.frameCount,
         channelCount: packet.header.channelCount,
         firstSampleIndex: packet.header.firstSampleIndex,
-        serverPresentationTimeNs: packet.header.serverPresentationTimeNs
+        serverPresentationTimeNs: packet.header.serverPresentationTimeNs,
+        targetPlaybackTimeMs
       } satisfies WorkerEvent,
       [packet.payload]
     );
@@ -325,5 +337,9 @@ self.addEventListener("message", (event: MessageEvent<WorkerCommand>) => {
     } else {
       closeAudioSocket();
     }
+  }
+
+  if (event.data.type === "setDeviceOffset") {
+    deviceOutputOffsetMs = event.data.offsetMs;
   }
 });

@@ -41,6 +41,16 @@ type AudioStatsState = {
   jitterMs: number | null;
 };
 
+type SyncStatsState = {
+  syncErrorMs: number | null;
+  bufferLeadMs: number | null;
+  playbackRatio: number | null;
+  underruns: number;
+  lateDrops: number;
+  resyncs: number;
+  queuedPackets: number;
+};
+
 type NetworkSample = {
   at: number;
   rttMs: number | null;
@@ -73,6 +83,13 @@ const createThemeMode = (): ThemeMode => {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 };
 
+const createDeviceOutputOffsetMs = () => {
+  const stored = Number(localStorage.getItem("radio.deviceOutputOffsetMs"));
+  return Number.isFinite(stored) ? stored : 0;
+};
+
+const nowMs = () => performance.timeOrigin + performance.now();
+
 const formatMs = (value: number | null, digits = 1) => {
   if (value === null || Number.isNaN(value)) {
     return "-";
@@ -98,6 +115,14 @@ const formatDuration = (valueMs: number | null) => {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+};
+
+const formatRatio = (value: number | null) => {
+  if (value === null || Number.isNaN(value)) {
+    return "-";
+  }
+
+  return value.toFixed(6);
 };
 
 const connectionLabel = (state: ConnectionState) => {
@@ -170,6 +195,18 @@ export function App() {
   });
   const [networkSamples, setNetworkSamples] = useState<NetworkSample[]>([]);
   const [themeMode, setThemeMode] = useState<ThemeMode>(createThemeMode);
+  const [deviceOutputOffsetMs, setDeviceOutputOffsetMs] = useState(
+    createDeviceOutputOffsetMs
+  );
+  const [syncStats, setSyncStats] = useState<SyncStatsState>({
+    syncErrorMs: null,
+    bufferLeadMs: null,
+    playbackRatio: null,
+    underruns: 0,
+    lateDrops: 0,
+    resyncs: 0,
+    queuedPackets: 0
+  });
 
   const deviceId = useMemo(createDeviceId, []);
 
@@ -179,24 +216,47 @@ export function App() {
   }, [themeMode]);
 
   useEffect(() => {
+    localStorage.setItem("radio.deviceOutputOffsetMs", `${deviceOutputOffsetMs}`);
+    workerRef.current?.postMessage({
+      type: "setDeviceOffset",
+      offsetMs: deviceOutputOffsetMs
+    } satisfies WorkerCommand);
+  }, [deviceOutputOffsetMs]);
+
+  useEffect(() => {
     const worker = new Worker(new URL("../workers/radio-worker.ts", import.meta.url), {
       type: "module"
     });
     workerRef.current = worker;
+    worker.postMessage({
+      type: "setDeviceOffset",
+      offsetMs: deviceOutputOffsetMs
+    } satisfies WorkerCommand);
 
     worker.onmessage = (event: MessageEvent<WorkerEvent>) => {
       const message = event.data;
 
       if (message.type === "audioPacket") {
-        if (streamEnabledRef.current && workletNodeRef.current) {
+        const audioContext = audioContextRef.current;
+        if (
+          streamEnabledRef.current &&
+          workletNodeRef.current &&
+          audioContext &&
+          message.targetPlaybackTimeMs !== null
+        ) {
+          const targetContextFrame = Math.round(
+            (audioContext.currentTime +
+              (message.targetPlaybackTimeMs - nowMs()) / 1_000) *
+              audioContext.sampleRate
+          );
           workletNodeRef.current.port.postMessage(
             {
-              type: "pcmPacket",
+              type: "timelinePacket",
               payload: message.payload,
               frameCount: message.frameCount,
               channelCount: message.channelCount,
               firstSampleIndex: message.firstSampleIndex,
-              serverPresentationTimeNs: message.serverPresentationTimeNs
+              targetContextFrame
             },
             [message.payload]
           );
@@ -331,6 +391,19 @@ export function App() {
       numberOfOutputs: 1,
       outputChannelCount: [2]
     });
+    node.port.onmessage = (event) => {
+      if (event.data.type === "syncStats") {
+        setSyncStats({
+          syncErrorMs: event.data.syncErrorMs,
+          bufferLeadMs: event.data.bufferLeadMs,
+          playbackRatio: event.data.playbackRatio,
+          underruns: event.data.underruns,
+          lateDrops: event.data.lateDrops,
+          resyncs: event.data.resyncs,
+          queuedPackets: event.data.queuedPackets
+        });
+      }
+    };
     node.connect(audioContext.destination);
 
     audioContextRef.current = audioContext;
@@ -346,6 +419,7 @@ export function App() {
     }
 
     setStreamEnabled(true);
+    postWorker({ type: "setDeviceOffset", offsetMs: deviceOutputOffsetMs });
     postWorker({ type: "setAudioEnabled", enabled: true });
   };
 
@@ -442,6 +516,16 @@ export function App() {
           }
           detail={`jitter ${formatMs(audioStats.jitterMs)}`}
         />
+        <MetricCard
+          label="同步误差"
+          value={formatMs(syncStats.syncErrorMs)}
+          detail={`buffer ${formatMs(syncStats.bufferLeadMs)}`}
+        />
+        <MetricCard
+          label="漂移修正"
+          value={formatRatio(syncStats.playbackRatio)}
+          detail={`${syncStats.queuedPackets} packets queued`}
+        />
       </section>
 
       <section className="network-panel">
@@ -514,6 +598,55 @@ export function App() {
             <div>
               <dt>Lead Drift</dt>
               <dd>{formatMs(leadDriftMs)}</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article className="panel calibration-panel">
+          <h2>Device Calibration</h2>
+          <p className="panel-note">正数延后本设备，负数提前本设备。</p>
+          <label className="offset-control">
+            <span>Offset</span>
+            <input
+              type="range"
+              min="-200"
+              max="200"
+              step="1"
+              value={deviceOutputOffsetMs}
+              onChange={(event) =>
+                setDeviceOutputOffsetMs(
+                  clamp(Number(event.currentTarget.value), -200, 200)
+                )
+              }
+            />
+          </label>
+          <div className="offset-row">
+            <input
+              type="number"
+              min="-200"
+              max="200"
+              step="1"
+              value={deviceOutputOffsetMs}
+              onChange={(event) =>
+                setDeviceOutputOffsetMs(
+                  clamp(Number(event.currentTarget.value), -200, 200)
+                )
+              }
+            />
+            <span>ms</span>
+          </div>
+          <dl>
+            <div>
+              <dt>Underruns</dt>
+              <dd>{syncStats.underruns}</dd>
+            </div>
+            <div>
+              <dt>Late Drops</dt>
+              <dd>{syncStats.lateDrops}</dd>
+            </div>
+            <div>
+              <dt>Resyncs</dt>
+              <dd>{syncStats.resyncs}</dd>
             </div>
           </dl>
         </article>

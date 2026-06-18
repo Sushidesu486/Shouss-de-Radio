@@ -48,7 +48,8 @@ export type ControlMessage =
 export type WorkerCommand =
   | { type: "connect"; deviceId: string }
   | { type: "disconnect" }
-  | { type: "setAudioEnabled"; enabled: boolean };
+  | { type: "setAudioEnabled"; enabled: boolean }
+  | { type: "setDeviceOffset"; offsetMs: number };
 
 export type WorkerEvent =
   | {
@@ -100,4 +101,5 @@ export type WorkerEvent =
       channelCount: number;
       firstSampleIndex: number;
       serverPresentationTimeNs: bigint;
+      targetPlaybackTimeMs: number | null;
     };
