@@ -168,8 +168,13 @@ pub enum ControlMessage {
         clock_offset_ms: f64,
         buffer_ms: f64,
         playback_error_ms: f64,
+        playback_error_p95_ms: Option<f64>,
+        playback_error_max_ms: Option<f64>,
         resample_ratio: f64,
         underruns: u64,
+        late_drops: Option<u64>,
+        resyncs: Option<u64>,
+        device_output_offset_ms: Option<f64>,
     },
 }
 

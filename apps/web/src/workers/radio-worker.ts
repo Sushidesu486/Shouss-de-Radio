@@ -202,6 +202,7 @@ const startAudioSocket = () => {
         type: "audioPacket",
         payload: packet.payload,
         frameCount: packet.header.frameCount,
+        sampleRateHz: packet.header.sampleRateHz,
         channelCount: packet.header.channelCount,
         firstSampleIndex: packet.header.firstSampleIndex,
         serverPresentationTimeNs: packet.header.serverPresentationTimeNs,
@@ -350,8 +351,13 @@ self.addEventListener("message", (event: MessageEvent<WorkerCommand>) => {
       clockOffsetMs: event.data.clockOffsetMs,
       bufferMs: event.data.bufferMs,
       playbackErrorMs: event.data.playbackErrorMs,
+      playbackErrorP95Ms: event.data.playbackErrorP95Ms,
+      playbackErrorMaxMs: event.data.playbackErrorMaxMs,
       resampleRatio: event.data.resampleRatio,
-      underruns: event.data.underruns
+      underruns: event.data.underruns,
+      lateDrops: event.data.lateDrops,
+      resyncs: event.data.resyncs,
+      deviceOutputOffsetMs: event.data.deviceOutputOffsetMs
     });
   }
 });

@@ -100,8 +100,10 @@ serverPresentationTimeNs + targetLatencyMs scheduling
 AudioWorklet ring-buffer playback
 ```
 
-The current AudioWorklet path plays received PCM packets in FIFO order. That is
-intentional for transport bring-up, but it is not yet synchronized playback.
+The current AudioWorklet path stores packets by `firstSampleIndex` and maps
+`serverPresentationTimeNs + targetLatencyMs + deviceOutputOffsetMs` to an
+AudioContext frame. Playback is driven by the stream timeline rather than FIFO
+arrival order.
 
 ## Drift Correction
 
@@ -115,11 +117,19 @@ expected playback position
 Small error is corrected by adjusting playback ratio:
 
 ```text
-0.9999 <= playbackRatio <= 1.0001
+0.999 <= playbackRatio <= 1.001
 ```
 
-The first implementation can use linear interpolation. Later versions can move
-the resampler into WASM if quality or CPU usage requires it.
+The current implementation uses linear interpolation in AudioWorklet. It also
+accounts for browsers whose actual AudioContext sample rate differs from the
+48 kHz stream sample rate.
+
+## Device Calibration
+
+Each browser stores a local `deviceOutputOffsetMs`. Positive values delay that
+device and negative values advance it. The calibration pulse is generated from
+the stream sample timeline, so two devices can be matched by ear before any
+future automatic microphone-based calibration.
 
 ## Recovery
 

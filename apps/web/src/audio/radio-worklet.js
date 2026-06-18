@@ -1,17 +1,18 @@
 const CHANNELS = 2;
 const STATS_INTERVAL_FRAMES = 24_000;
-const MAX_BUFFER_FRAMES = sampleRate * 20;
-const HISTORY_FRAMES = sampleRate * 2;
-const SNAP_THRESHOLD_FRAMES = sampleRate * 0.2;
-const ANCHOR_RESET_THRESHOLD_FRAMES = sampleRate * 0.5;
+const DEFAULT_SOURCE_SAMPLE_RATE = 48_000;
+const MAX_BUFFER_SECONDS = 20;
+const HISTORY_SECONDS = 2;
+const SNAP_THRESHOLD_SECONDS = 0.2;
+const ANCHOR_RESET_THRESHOLD_SECONDS = 0.5;
 const ANCHOR_SMOOTHING = 0.02;
-const MAX_INTEGRAL_FRAMES = sampleRate * 0.25;
+const MAX_INTEGRAL_SECONDS = 0.25;
 const MIN_PLAYBACK_RATIO = 0.999;
 const MAX_PLAYBACK_RATIO = 1.001;
 const KP = 0.0000012;
 const KI = 0.0000000008;
-const PULSE_INTERVAL_FRAMES = sampleRate;
-const PULSE_LENGTH_FRAMES = Math.round(sampleRate * 0.012);
+const PULSE_INTERVAL_SECONDS = 1;
+const PULSE_LENGTH_SECONDS = 0.012;
 const PULSE_FREQUENCY_HZ = 880;
 const PULSE_GAIN = 0.28;
 
@@ -23,6 +24,8 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
     this.enabled = false;
     this.packets = new Map();
     this.packetFrames = 0;
+    this.sourceSampleRate = DEFAULT_SOURCE_SAMPLE_RATE;
+    this.sourceFramesPerContextFrame = this.sourceSampleRate / sampleRate;
     this.anchor = null;
     this.playhead = null;
     this.bufferStart = null;
@@ -59,6 +62,8 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
   reset() {
     this.packets.clear();
     this.packetFrames = 0;
+    this.sourceSampleRate = DEFAULT_SOURCE_SAMPLE_RATE;
+    this.sourceFramesPerContextFrame = this.sourceSampleRate / sampleRate;
     this.anchor = null;
     this.playhead = null;
     this.bufferStart = null;
@@ -89,7 +94,10 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
     const anchorErrorFrames = packet.firstSampleIndex - predictedSampleIndex;
     this.anchorErrorFrames = anchorErrorFrames;
 
-    if (Math.abs(anchorErrorFrames) > ANCHOR_RESET_THRESHOLD_FRAMES) {
+    if (
+      Math.abs(anchorErrorFrames) >
+      this.sourceSampleRate * ANCHOR_RESET_THRESHOLD_SECONDS
+    ) {
       this.anchor = nextAnchor;
       this.playhead = null;
       this.integralErrorFrames = 0;
@@ -106,6 +114,16 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
   insertPacket(packet) {
     if (packet.frameCount <= 0 || packet.channelCount <= 0) {
       return;
+    }
+
+    const nextSourceSampleRate = packet.sampleRateHz || DEFAULT_SOURCE_SAMPLE_RATE;
+    if (nextSourceSampleRate !== this.sourceSampleRate) {
+      this.sourceSampleRate = nextSourceSampleRate;
+      this.sourceFramesPerContextFrame = this.sourceSampleRate / sampleRate;
+      this.anchor = null;
+      this.playhead = null;
+      this.integralErrorFrames = 0;
+      this.resyncs += 1;
     }
 
     this.packetFrames = packet.frameCount;
@@ -131,7 +149,10 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
       return null;
     }
 
-    return this.anchor.sampleIndex + (contextFrame - this.anchor.contextFrame);
+    return (
+      this.anchor.sampleIndex +
+      (contextFrame - this.anchor.contextFrame) * this.sourceFramesPerContextFrame
+    );
   }
 
   packetStartFor(sampleIndex) {
@@ -205,14 +226,16 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
       return;
     }
 
-    const dropBefore = referenceSampleIndex - HISTORY_FRAMES;
+    const dropBefore = referenceSampleIndex - this.sourceSampleRate * HISTORY_SECONDS;
     for (const [firstSampleIndex, packet] of this.packets) {
       if (firstSampleIndex + packet.frameCount < dropBefore) {
         this.packets.delete(firstSampleIndex);
       }
     }
 
-    const maxPackets = Math.ceil(MAX_BUFFER_FRAMES / Math.max(1, this.packetFrames));
+    const maxPackets = Math.ceil(
+      (this.sourceSampleRate * MAX_BUFFER_SECONDS) / Math.max(1, this.packetFrames)
+    );
     if (this.packets.size <= maxPackets) {
       return;
     }
@@ -235,7 +258,11 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
       return [0, 0];
     }
 
-    if (this.playhead === null || Math.abs(targetSampleIndex - this.playhead) > SNAP_THRESHOLD_FRAMES) {
+    if (
+      this.playhead === null ||
+      Math.abs(targetSampleIndex - this.playhead) >
+        this.sourceSampleRate * SNAP_THRESHOLD_SECONDS
+    ) {
       this.playhead = targetSampleIndex;
       this.lastRenderedSampleIndex = targetSampleIndex;
       this.integralErrorFrames = 0;
@@ -246,8 +273,8 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
     const errorFrames = targetSampleIndex - this.playhead;
     this.integralErrorFrames = clamp(
       this.integralErrorFrames + errorFrames,
-      -MAX_INTEGRAL_FRAMES,
-      MAX_INTEGRAL_FRAMES
+      -this.sourceSampleRate * MAX_INTEGRAL_SECONDS,
+      this.sourceSampleRate * MAX_INTEGRAL_SECONDS
     );
     const correction = errorFrames * KP + this.integralErrorFrames * KI;
     this.playbackRatio = clamp(
@@ -258,7 +285,7 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
 
     const renderedSampleIndex = this.playhead;
     const frame = this.interpolatedFrame(renderedSampleIndex);
-    this.playhead += this.playbackRatio;
+    this.playhead += this.sourceFramesPerContextFrame * this.playbackRatio;
 
     if (frame === null) {
       if (!this.missing && targetSampleIndex >= start && targetSampleIndex < end) {
@@ -279,13 +306,20 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
       return 0;
     }
 
-    const phaseFrame = Math.floor(sampleIndex) % PULSE_INTERVAL_FRAMES;
-    if (phaseFrame >= PULSE_LENGTH_FRAMES) {
+    const pulseIntervalFrames = Math.round(
+      this.sourceSampleRate * PULSE_INTERVAL_SECONDS
+    );
+    const pulseLengthFrames = Math.round(
+      this.sourceSampleRate * PULSE_LENGTH_SECONDS
+    );
+    const phaseFrame = Math.floor(sampleIndex) % pulseIntervalFrames;
+    if (phaseFrame >= pulseLengthFrames) {
       return 0;
     }
 
-    const envelope = 1 - phaseFrame / PULSE_LENGTH_FRAMES;
-    const phase = (2 * Math.PI * PULSE_FREQUENCY_HZ * phaseFrame) / sampleRate;
+    const envelope = 1 - phaseFrame / pulseLengthFrames;
+    const phase =
+      (2 * Math.PI * PULSE_FREQUENCY_HZ * phaseFrame) / this.sourceSampleRate;
     return Math.sin(phase) * envelope * PULSE_GAIN;
   }
 
@@ -300,18 +334,18 @@ class RadioPlayerProcessor extends AudioWorkletProcessor {
     const syncErrorMs =
       targetSampleIndex === null || this.playhead === null
         ? null
-        : ((this.playhead - targetSampleIndex) * 1000) / sampleRate;
+        : ((this.playhead - targetSampleIndex) * 1000) / this.sourceSampleRate;
     const bufferLeadMs =
       targetSampleIndex === null || end === null
         ? null
-        : ((end - targetSampleIndex) * 1000) / sampleRate;
+        : ((end - targetSampleIndex) * 1000) / this.sourceSampleRate;
 
     this.port.postMessage({
       type: "syncStats",
       syncErrorMs,
       bufferLeadMs,
       playbackRatio: this.playbackRatio,
-      anchorErrorMs: (this.anchorErrorFrames * 1000) / sampleRate,
+      anchorErrorMs: (this.anchorErrorFrames * 1000) / this.sourceSampleRate,
       underruns: this.underruns,
       lateDrops: this.lateDrops,
       resyncs: this.resyncs,

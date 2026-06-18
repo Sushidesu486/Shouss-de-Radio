@@ -65,10 +65,24 @@ Messages use a `type` field with camelCase names.
   "clockOffsetMs": -12.4,
   "bufferMs": 7200,
   "playbackErrorMs": 1.7,
+  "playbackErrorP95Ms": 4.2,
+  "playbackErrorMaxMs": 8.8,
   "resampleRatio": 1.00003,
-  "underruns": 0
+  "underruns": 0,
+  "lateDrops": 0,
+  "resyncs": 1,
+  "deviceOutputOffsetMs": -12
 }
 ```
+
+## Diagnostics
+
+```text
+GET /api/clients
+```
+
+Returns the current in-memory status for connected control clients. This is used
+to compare multi-device playback quality while tuning for 10 ms-class sync.
 
 ## Audio Packet v0
 

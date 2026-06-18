@@ -437,6 +437,80 @@ dd {
   line-height: 1.4;
 }
 
+.client-panel {
+  grid-column: span 2;
+}
+
+.client-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.client-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+
+.client-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.client-main {
+  min-width: 0;
+}
+
+.client-main strong,
+.client-main span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.client-main strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.client-main span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.client-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.client-metrics span {
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: var(--panel-soft);
+  white-space: nowrap;
+}
+
+.sync-badge.good {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent-strong);
+}
+
+.sync-badge.warn {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+  color: var(--warning);
+}
+
 .calibration-panel {
   display: flex;
   flex-direction: column;
@@ -516,6 +590,14 @@ dd {
     border-left: 0;
     padding-top: 18px;
     padding-left: 0;
+  }
+
+  .client-panel {
+    grid-column: auto;
+  }
+
+  .client-row {
+    grid-template-columns: 1fr;
   }
 }
 

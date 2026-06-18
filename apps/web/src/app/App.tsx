@@ -52,6 +52,36 @@ type SyncStatsState = {
   queuedPackets: number;
 };
 
+type SyncQualityState = {
+  p95Ms: number | null;
+  maxMs: number | null;
+  sampleCount: number;
+};
+
+type ClientDiagnostic = {
+  id: number;
+  deviceId: string | null;
+  userAgent: string | null;
+  connectedAtMs: number;
+  lastSeenMs: number;
+  rttMs: number | null;
+  clockOffsetMs: number | null;
+  bufferMs: number | null;
+  playbackErrorMs: number | null;
+  playbackErrorP95Ms: number | null;
+  playbackErrorMaxMs: number | null;
+  resampleRatio: number | null;
+  underruns: number;
+  lateDrops: number;
+  resyncs: number;
+  deviceOutputOffsetMs: number | null;
+};
+
+type ClientDiagnosticsResponse = {
+  serverTimeMs: number;
+  clients: ClientDiagnostic[];
+};
+
 type NetworkSample = {
   at: number;
   rttMs: number | null;
@@ -63,6 +93,7 @@ type NetworkSample = {
 type ThemeMode = "light" | "dark";
 
 const MAX_NETWORK_SAMPLES = 240;
+const MAX_SYNC_QUALITY_SAMPLES = 240;
 
 const createDeviceId = () => {
   const existing = localStorage.getItem("radio.deviceId");
@@ -159,12 +190,32 @@ const pushSample = (
   return [...samples, next].slice(-MAX_NETWORK_SAMPLES);
 };
 
+const summarizeSyncQuality = (samples: number[]): SyncQualityState => {
+  if (samples.length === 0) {
+    return { p95Ms: null, maxMs: null, sampleCount: 0 };
+  }
+
+  const sorted = [...samples].sort((left, right) => left - right);
+  const p95Index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * 0.95) - 1)
+  );
+
+  return {
+    p95Ms: sorted[p95Index],
+    maxMs: sorted.at(-1) ?? null,
+    sampleCount: sorted.length
+  };
+};
+
 export function App() {
   const workerRef = useRef<Worker | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const streamEnabledRef = useRef(false);
   const targetLatencyRef = useRef<number | null>(null);
+  const deviceOutputOffsetRef = useRef(0);
+  const syncErrorSamplesRef = useRef<number[]>([]);
   const clockRef = useRef<ClockState>({
     rttMs: null,
     clockOffsetMs: null,
@@ -215,6 +266,12 @@ export function App() {
     resyncs: 0,
     queuedPackets: 0
   });
+  const [syncQuality, setSyncQuality] = useState<SyncQualityState>({
+    p95Ms: null,
+    maxMs: null,
+    sampleCount: 0
+  });
+  const [clientDiagnostics, setClientDiagnostics] = useState<ClientDiagnostic[]>([]);
 
   const deviceId = useMemo(createDeviceId, []);
 
@@ -228,6 +285,7 @@ export function App() {
   }, [clock]);
 
   useEffect(() => {
+    deviceOutputOffsetRef.current = deviceOutputOffsetMs;
     localStorage.setItem("radio.deviceOutputOffsetMs", `${deviceOutputOffsetMs}`);
     workerRef.current?.postMessage({
       type: "setDeviceOffset",
@@ -266,6 +324,7 @@ export function App() {
               type: "timelinePacket",
               payload: message.payload,
               frameCount: message.frameCount,
+              sampleRateHz: message.sampleRateHz,
               channelCount: message.channelCount,
               firstSampleIndex: message.firstSampleIndex,
               targetContextFrame
@@ -379,6 +438,36 @@ export function App() {
     });
   }, [calibrationPulseEnabled]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadClientDiagnostics = async () => {
+      try {
+        const response = await fetch("/api/clients", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const diagnostics = (await response.json()) as ClientDiagnosticsResponse;
+        if (!cancelled) {
+          setClientDiagnostics(diagnostics.clients);
+        }
+      } catch {
+        if (!cancelled) {
+          setClientDiagnostics([]);
+        }
+      }
+    };
+
+    loadClientDiagnostics();
+    const timer = window.setInterval(loadClientDiagnostics, 1_500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const postWorker = (command: WorkerCommand) => {
     workerRef.current?.postMessage(command);
   };
@@ -413,6 +502,16 @@ export function App() {
     node.port.onmessage = (event) => {
       if (event.data.type === "syncStats") {
         const syncErrorMs = event.data.syncErrorMs;
+        let quality = summarizeSyncQuality(syncErrorSamplesRef.current);
+        if (syncErrorMs !== null && Number.isFinite(syncErrorMs)) {
+          syncErrorSamplesRef.current = [
+            ...syncErrorSamplesRef.current,
+            Math.abs(syncErrorMs)
+          ].slice(-MAX_SYNC_QUALITY_SAMPLES);
+          quality = summarizeSyncQuality(syncErrorSamplesRef.current);
+        }
+
+        setSyncQuality(quality);
         setSyncStats({
           syncErrorMs,
           bufferLeadMs: event.data.bufferLeadMs,
@@ -437,8 +536,13 @@ export function App() {
           clockOffsetMs: clockRef.current.clockOffsetMs ?? 0,
           bufferMs: event.data.bufferLeadMs ?? 0,
           playbackErrorMs: syncErrorMs ?? 0,
+          playbackErrorP95Ms: quality.p95Ms,
+          playbackErrorMaxMs: quality.maxMs,
           resampleRatio: event.data.playbackRatio ?? 1,
-          underruns: event.data.underruns
+          underruns: event.data.underruns,
+          lateDrops: event.data.lateDrops,
+          resyncs: event.data.resyncs,
+          deviceOutputOffsetMs: deviceOutputOffsetRef.current
         } satisfies WorkerCommand);
       }
     };
@@ -460,6 +564,8 @@ export function App() {
       connect();
     }
 
+    syncErrorSamplesRef.current = [];
+    setSyncQuality({ p95Ms: null, maxMs: null, sampleCount: 0 });
     setStreamEnabled(true);
     postWorker({ type: "setDeviceOffset", offsetMs: deviceOutputOffsetMs });
     postWorker({ type: "setAudioEnabled", enabled: true });
@@ -477,6 +583,7 @@ export function App() {
   const trackTitle = track?.title ?? "等待曲目";
   const trackArtist = track?.artist ?? "Shouss de Radio";
   const streamStatus = streamEnabled ? "正在收听" : "待机";
+  deviceOutputOffsetRef.current = deviceOutputOffsetMs;
 
   return (
     <main className="shell">
@@ -564,6 +671,11 @@ export function App() {
           detail={`buffer ${formatMs(syncStats.bufferLeadMs)}`}
         />
         <MetricCard
+          label="10ms P95"
+          value={formatMs(syncQuality.p95Ms)}
+          detail={`${syncQuality.sampleCount} samples, max ${formatMs(syncQuality.maxMs)}`}
+        />
+        <MetricCard
           label="漂移修正"
           value={formatRatio(syncStats.playbackRatio)}
           detail={`${syncStats.queuedPackets} packets queued`}
@@ -642,6 +754,50 @@ export function App() {
               <dd>{formatMs(leadDriftMs)}</dd>
             </div>
           </dl>
+        </article>
+
+        <article className="panel client-panel">
+          <h2>Client Sync</h2>
+          <div className="client-list">
+            {clientDiagnostics.length === 0 ? (
+              <p className="panel-note">等待客户端状态</p>
+            ) : (
+              clientDiagnostics.map((client) => (
+                <div className="client-row" key={client.id}>
+                  <div className="client-main">
+                    <strong>
+                      {client.deviceId === deviceId
+                        ? "本机"
+                        : client.deviceId?.slice(0, 8) ?? `client ${client.id}`}
+                    </strong>
+                    <span>
+                      {client.deviceOutputOffsetMs === null
+                        ? "offset -"
+                        : `offset ${formatMs(client.deviceOutputOffsetMs)}`}
+                    </span>
+                  </div>
+                  <div className="client-metrics">
+                    <span
+                      className={
+                        client.playbackErrorP95Ms !== null &&
+                        client.playbackErrorP95Ms <= 10
+                          ? "sync-badge good"
+                          : "sync-badge warn"
+                      }
+                    >
+                      p95 {formatMs(client.playbackErrorP95Ms)}
+                    </span>
+                    <span>err {formatMs(client.playbackErrorMs)}</span>
+                    <span>buf {formatMs(client.bufferMs)}</span>
+                    <span>rtt {formatMs(client.rttMs)}</span>
+                    <span>
+                      u/d/r {client.underruns}/{client.lateDrops}/{client.resyncs}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </article>
 
         <article className="panel calibration-panel">

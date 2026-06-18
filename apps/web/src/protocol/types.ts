@@ -41,8 +41,13 @@ export type ControlMessage =
       clockOffsetMs: number;
       bufferMs: number;
       playbackErrorMs: number;
+      playbackErrorP95Ms: number | null;
+      playbackErrorMaxMs: number | null;
       resampleRatio: number;
       underruns: number;
+      lateDrops: number;
+      resyncs: number;
+      deviceOutputOffsetMs: number;
     };
 
 export type WorkerCommand =
@@ -56,8 +61,13 @@ export type WorkerCommand =
       clockOffsetMs: number;
       bufferMs: number;
       playbackErrorMs: number;
+      playbackErrorP95Ms: number | null;
+      playbackErrorMaxMs: number | null;
       resampleRatio: number;
       underruns: number;
+      lateDrops: number;
+      resyncs: number;
+      deviceOutputOffsetMs: number;
     };
 
 export type WorkerEvent =
@@ -107,6 +117,7 @@ export type WorkerEvent =
       type: "audioPacket";
       payload: ArrayBuffer;
       frameCount: number;
+      sampleRateHz: number;
       channelCount: number;
       firstSampleIndex: number;
       serverPresentationTimeNs: bigint;

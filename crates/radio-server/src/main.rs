@@ -14,12 +14,13 @@ use radio_core::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs::File,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -43,6 +44,8 @@ struct AppState {
     control_tx: broadcast::Sender<ControlMessage>,
     stream_started_at_ns: i128,
     source: Arc<AudioSource>,
+    next_client_id: AtomicUsize,
+    clients: Mutex<HashMap<usize, ClientDiagnostic>>,
     connected_clients: AtomicUsize,
     active_audio_sockets: AtomicUsize,
 }
@@ -57,8 +60,9 @@ struct AudioSource {
     sample_rate_hz: u32,
 }
 
+#[derive(Clone, Copy)]
 enum AudienceCounterKind {
-    Control,
+    Control { client_id: usize },
     Audio,
 }
 
@@ -67,11 +71,53 @@ struct AudienceCounterGuard {
     kind: AudienceCounterKind,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientDiagnostic {
+    id: usize,
+    device_id: Option<String>,
+    user_agent: Option<String>,
+    connected_at_ms: f64,
+    last_seen_ms: f64,
+    rtt_ms: Option<f64>,
+    clock_offset_ms: Option<f64>,
+    buffer_ms: Option<f64>,
+    playback_error_ms: Option<f64>,
+    playback_error_p95_ms: Option<f64>,
+    playback_error_max_ms: Option<f64>,
+    resample_ratio: Option<f64>,
+    underruns: u64,
+    late_drops: u64,
+    resyncs: u64,
+    device_output_offset_ms: Option<f64>,
+}
+
+struct ClientStatusPatch {
+    rtt_ms: f64,
+    clock_offset_ms: f64,
+    buffer_ms: f64,
+    playback_error_ms: f64,
+    playback_error_p95_ms: Option<f64>,
+    playback_error_max_ms: Option<f64>,
+    resample_ratio: f64,
+    underruns: u64,
+    late_drops: Option<u64>,
+    resyncs: Option<u64>,
+    device_output_offset_ms: Option<f64>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HealthResponse {
     ok: bool,
     server_time_ms: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientDiagnosticsResponse {
+    server_time_ms: f64,
+    clients: Vec<ClientDiagnostic>,
 }
 
 #[tokio::main]
@@ -97,12 +143,15 @@ async fn main() -> anyhow::Result<()> {
         control_tx,
         stream_started_at_ns: unix_time_ns(),
         source,
+        next_client_id: AtomicUsize::new(1),
+        clients: Mutex::new(HashMap::new()),
         connected_clients: AtomicUsize::new(0),
         active_audio_sockets: AtomicUsize::new(0),
     });
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/api/clients", get(client_diagnostics))
         .route("/ws/control", get(control_ws))
         .route("/ws/audio", get(audio_ws))
         .fallback_service(ServeDir::new("apps/web/dist"))
@@ -132,6 +181,10 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+async fn client_diagnostics(State(state): State<Arc<AppState>>) -> Json<ClientDiagnosticsResponse> {
+    Json(state.client_diagnostics())
+}
+
 async fn control_ws(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_control_socket(socket, state))
 }
@@ -142,7 +195,8 @@ async fn audio_ws(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> i
 
 async fn handle_control_socket(socket: WebSocket, state: Arc<AppState>) {
     let (mut sender, mut receiver) = socket.split();
-    let _counter_guard = state.track_control_connection();
+    let counter_guard = state.track_control_connection();
+    let client_id = counter_guard.client_id();
     let mut control_rx = state.control_tx.subscribe();
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<ControlMessage>(32);
 
@@ -181,7 +235,9 @@ async fn handle_control_socket(socket: WebSocket, state: Arc<AppState>) {
 
     while let Some(Ok(message)) = receiver.next().await {
         match message {
-            Message::Text(text) => handle_control_message(&state, &outbound_tx, &text).await,
+            Message::Text(text) => {
+                handle_control_message(&state, client_id, &outbound_tx, &text).await
+            }
             Message::Close(_) => break,
             _ => {}
         }
@@ -191,7 +247,8 @@ async fn handle_control_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 
 async fn handle_control_message(
-    _state: &AppState,
+    state: &AppState,
+    client_id: usize,
     outbound_tx: &mpsc::Sender<ControlMessage>,
     text: &str,
 ) {
@@ -210,10 +267,43 @@ async fn handle_control_message(
                 warn!("failed to send clock pong");
             }
         }
-        Ok(ControlMessage::Hello { device_id, .. }) => {
+        Ok(ControlMessage::Hello {
+            device_id,
+            user_agent,
+        }) => {
+            state.update_client_identity(client_id, device_id.clone(), user_agent);
             info!(%device_id, "device connected");
         }
-        Ok(ControlMessage::ClientStatus { .. }) => {}
+        Ok(ControlMessage::ClientStatus {
+            rtt_ms,
+            clock_offset_ms,
+            buffer_ms,
+            playback_error_ms,
+            playback_error_p95_ms,
+            playback_error_max_ms,
+            resample_ratio,
+            underruns,
+            late_drops,
+            resyncs,
+            device_output_offset_ms,
+        }) => {
+            state.update_client_status(
+                client_id,
+                ClientStatusPatch {
+                    rtt_ms,
+                    clock_offset_ms,
+                    buffer_ms,
+                    playback_error_ms,
+                    playback_error_p95_ms,
+                    playback_error_max_ms,
+                    resample_ratio,
+                    underruns,
+                    late_drops,
+                    resyncs,
+                    device_output_offset_ms,
+                },
+            );
+        }
         Ok(ControlMessage::TrackInfo { .. } | ControlMessage::AudienceStats { .. }) => {}
         Ok(other) => {
             info!(?other, "received control message");
@@ -275,11 +365,16 @@ async fn handle_audio_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
 impl AppState {
     fn track_control_connection(self: &Arc<Self>) -> AudienceCounterGuard {
+        let client_id = self.next_client_id.fetch_add(1, Ordering::AcqRel);
+        self.clients
+            .lock()
+            .expect("clients mutex poisoned")
+            .insert(client_id, ClientDiagnostic::new(client_id, unix_time_ms()));
         self.connected_clients.fetch_add(1, Ordering::AcqRel);
         self.broadcast_audience_stats();
         AudienceCounterGuard {
             state: Arc::clone(self),
-            kind: AudienceCounterKind::Control,
+            kind: AudienceCounterKind::Control { client_id },
         }
     }
 
@@ -327,13 +422,64 @@ impl AppState {
     fn broadcast_audience_stats(&self) {
         let _ = self.control_tx.send(self.audience_stats_message());
     }
+
+    fn update_client_identity(&self, client_id: usize, device_id: String, user_agent: String) {
+        let mut clients = self.clients.lock().expect("clients mutex poisoned");
+        if let Some(client) = clients.get_mut(&client_id) {
+            client.device_id = Some(device_id);
+            client.user_agent = Some(user_agent);
+            client.last_seen_ms = unix_time_ms();
+        }
+    }
+
+    fn update_client_status(&self, client_id: usize, patch: ClientStatusPatch) {
+        let mut clients = self.clients.lock().expect("clients mutex poisoned");
+        if let Some(client) = clients.get_mut(&client_id) {
+            client.last_seen_ms = unix_time_ms();
+            client.rtt_ms = Some(patch.rtt_ms);
+            client.clock_offset_ms = Some(patch.clock_offset_ms);
+            client.buffer_ms = Some(patch.buffer_ms);
+            client.playback_error_ms = Some(patch.playback_error_ms);
+            client.playback_error_p95_ms = patch.playback_error_p95_ms;
+            client.playback_error_max_ms = patch.playback_error_max_ms;
+            client.resample_ratio = Some(patch.resample_ratio);
+            client.underruns = patch.underruns;
+            client.late_drops = patch.late_drops.unwrap_or(client.late_drops);
+            client.resyncs = patch.resyncs.unwrap_or(client.resyncs);
+            client.device_output_offset_ms = patch.device_output_offset_ms;
+        }
+    }
+
+    fn remove_client(&self, client_id: usize) {
+        self.clients
+            .lock()
+            .expect("clients mutex poisoned")
+            .remove(&client_id);
+    }
+
+    fn client_diagnostics(&self) -> ClientDiagnosticsResponse {
+        let mut clients = self
+            .clients
+            .lock()
+            .expect("clients mutex poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        clients.sort_by_key(|client| client.id);
+
+        ClientDiagnosticsResponse {
+            server_time_ms: unix_time_ms(),
+            clients,
+        }
+    }
 }
 
 impl Drop for AudienceCounterGuard {
     fn drop(&mut self) {
         match self.kind {
-            AudienceCounterKind::Control => {
+            AudienceCounterKind::Control { client_id } => {
                 self.state.connected_clients.fetch_sub(1, Ordering::AcqRel);
+                self.state.remove_client(client_id);
             }
             AudienceCounterKind::Audio => {
                 self.state
@@ -343,6 +489,38 @@ impl Drop for AudienceCounterGuard {
         }
 
         self.state.broadcast_audience_stats();
+    }
+}
+
+impl AudienceCounterGuard {
+    fn client_id(&self) -> usize {
+        match self.kind {
+            AudienceCounterKind::Control { client_id } => client_id,
+            AudienceCounterKind::Audio => 0,
+        }
+    }
+}
+
+impl ClientDiagnostic {
+    fn new(id: usize, now_ms: f64) -> Self {
+        Self {
+            id,
+            device_id: None,
+            user_agent: None,
+            connected_at_ms: now_ms,
+            last_seen_ms: now_ms,
+            rtt_ms: None,
+            clock_offset_ms: None,
+            buffer_ms: None,
+            playback_error_ms: None,
+            playback_error_p95_ms: None,
+            playback_error_max_ms: None,
+            resample_ratio: None,
+            underruns: 0,
+            late_drops: 0,
+            resyncs: 0,
+            device_output_offset_ms: None,
+        }
     }
 }
 
