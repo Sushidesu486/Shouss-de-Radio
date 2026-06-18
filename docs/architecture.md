@@ -13,7 +13,7 @@ playback correction, and device-specific rendering.
 
 - Serve the web app over HTTPS in production.
 - Maintain authoritative server time and stream sample timeline.
-- Load the first `.flac` or `.wav` file in `media/tracks`.
+- Load `.flac` and `.wav` files in `media/tracks` as a sorted looping playlist.
 - Decode source audio into a cached 48 kHz stereo float32 timeline.
 - Encode the shared stream once, then broadcast the same packets to clients.
 - Attach sequence, sample index, and presentation time to every audio packet.
@@ -51,8 +51,7 @@ AudioWorklet
 ## Phases
 
 1. Bring up WebSocket control and timestamped PCM packets from `media/tracks`.
-2. Replace FIFO playback with browser-side jitter buffer and timeline-aware
-   AudioWorklet playback.
+2. Use browser-side jitter buffer and timeline-aware AudioWorklet playback.
 3. Add fixed target latency and multi-browser synchronized start.
 4. Add PI-controller drift correction and light resampling.
 5. Add Opus encoding/decoding.

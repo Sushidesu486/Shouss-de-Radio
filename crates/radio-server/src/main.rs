@@ -43,14 +43,20 @@ use tracing::{info, warn};
 struct AppState {
     control_tx: broadcast::Sender<ControlMessage>,
     stream_started_at_ns: i128,
-    source: Arc<AudioSource>,
+    playlist: Arc<AudioPlaylist>,
+    current_track_index: AtomicUsize,
     next_client_id: AtomicUsize,
     clients: Mutex<HashMap<usize, ClientDiagnostic>>,
     connected_clients: AtomicUsize,
     active_audio_sockets: AtomicUsize,
 }
 
-struct AudioSource {
+struct AudioPlaylist {
+    tracks: Vec<AudioTrack>,
+    total_frame_count: u64,
+}
+
+struct AudioTrack {
     path: PathBuf,
     title: String,
     artist: Option<String>,
@@ -130,19 +136,20 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let (control_tx, _) = broadcast::channel(128);
-    let source = Arc::new(load_first_track(Path::new("media/tracks"))?);
+    let playlist = Arc::new(load_playlist(Path::new("media/tracks"))?);
     info!(
-        path = %source.path.display(),
-        frames = source.frame_count,
-        sample_rate_hz = source.sample_rate_hz,
-        channel_count = source.channel_count,
-        "loaded audio source"
+        tracks = playlist.tracks.len(),
+        frames = playlist.total_frame_count,
+        sample_rate_hz = SAMPLE_RATE_HZ,
+        channel_count = 2,
+        "loaded audio playlist"
     );
 
     let state = Arc::new(AppState {
         control_tx,
         stream_started_at_ns: unix_time_ns(),
-        source,
+        playlist,
+        current_track_index: AtomicUsize::new(0),
         next_client_id: AtomicUsize::new(1),
         clients: Mutex::new(HashMap::new()),
         connected_clients: AtomicUsize::new(0),
@@ -208,7 +215,7 @@ async fn handle_control_socket(socket: WebSocket, state: Arc<AppState>) {
 
     for message in [
         session,
-        state.track_info_message(),
+        state.current_track_info_message(),
         state.audience_stats_message(),
     ] {
         if !send_control_message(&mut sender, &message).await {
@@ -337,6 +344,7 @@ async fn handle_audio_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
     loop {
         interval.tick().await;
+        state.broadcast_track_info_if_changed(sample_index);
 
         let header = AudioPacketHeader {
             codec: AudioCodec::PcmF32,
@@ -351,7 +359,7 @@ async fn handle_audio_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 SAMPLE_RATE_HZ,
             ),
         };
-        let payload = state.source.payload_for(sample_index, frame_count);
+        let payload = state.playlist.payload_for(sample_index, frame_count);
         let packet = encode_audio_packet(&header, &payload);
 
         if socket.send(Message::Binary(packet.into())).await.is_err() {
@@ -387,21 +395,19 @@ impl AppState {
         }
     }
 
-    fn track_info_message(&self) -> ControlMessage {
-        ControlMessage::TrackInfo {
-            title: self.source.title.clone(),
-            artist: self.source.artist.clone(),
-            filename: self
-                .source
-                .path
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            duration_ms: self.source.frame_count as f64 * 1_000.0
-                / self.source.sample_rate_hz as f64,
-            sample_rate_hz: self.source.sample_rate_hz,
-            channel_count: self.source.channel_count,
+    fn current_track_info_message(&self) -> ControlMessage {
+        self.playlist
+            .track_info_message(current_stream_sample_index(self.stream_started_at_ns))
+    }
+
+    fn broadcast_track_info_if_changed(&self, stream_sample_index: u64) {
+        let track_index = self.playlist.track_index_at(stream_sample_index);
+        let previous = self.current_track_index.swap(track_index, Ordering::AcqRel);
+
+        if previous != track_index {
+            let _ = self
+                .control_tx
+                .send(self.playlist.track_info_message(stream_sample_index));
         }
     }
 
@@ -552,17 +558,58 @@ fn stream_time_ns(stream_started_at_ns: i128, sample_index: u64, sample_rate_hz:
     stream_started_at_ns + (sample_index as i128 * 1_000_000_000_i128) / sample_rate_hz as i128
 }
 
-impl AudioSource {
+impl AudioPlaylist {
+    fn track_index_at(&self, stream_sample_index: u64) -> usize {
+        self.track_position_at(stream_sample_index).0
+    }
+
+    fn track_position_at(&self, stream_sample_index: u64) -> (usize, u64) {
+        let mut playlist_frame = stream_sample_index % self.total_frame_count;
+
+        for (track_index, track) in self.tracks.iter().enumerate() {
+            if playlist_frame < track.frame_count {
+                return (track_index, playlist_frame);
+            }
+
+            playlist_frame -= track.frame_count;
+        }
+
+        (
+            self.tracks.len() - 1,
+            self.tracks.last().map_or(0, |track| track.frame_count - 1),
+        )
+    }
+
+    fn track_info_message(&self, stream_sample_index: u64) -> ControlMessage {
+        let (track_index, _) = self.track_position_at(stream_sample_index);
+        let track = &self.tracks[track_index];
+
+        ControlMessage::TrackInfo {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            filename: track
+                .path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            duration_ms: track.frame_count as f64 * 1_000.0 / track.sample_rate_hz as f64,
+            sample_rate_hz: track.sample_rate_hz,
+            channel_count: track.channel_count,
+        }
+    }
+
     fn payload_for(&self, first_sample_index: u64, frame_count: u32) -> Vec<u8> {
-        let channel_count = self.channel_count as usize;
+        let channel_count = 2_usize;
         let mut payload = Vec::with_capacity(frame_count as usize * channel_count * 4);
 
         for frame in 0..frame_count as u64 {
-            let source_frame = (first_sample_index + frame) % self.frame_count;
+            let (track_index, source_frame) = self.track_position_at(first_sample_index + frame);
+            let track = &self.tracks[track_index];
             let sample_offset = source_frame as usize * channel_count;
 
             for channel in 0..channel_count {
-                payload.extend_from_slice(&self.samples[sample_offset + channel].to_le_bytes());
+                payload.extend_from_slice(&track.samples[sample_offset + channel].to_le_bytes());
             }
         }
 
@@ -570,7 +617,7 @@ impl AudioSource {
     }
 }
 
-fn load_first_track(track_dir: &Path) -> anyhow::Result<AudioSource> {
+fn load_playlist(track_dir: &Path) -> anyhow::Result<AudioPlaylist> {
     let mut candidates = std::fs::read_dir(track_dir)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -585,15 +632,27 @@ fn load_first_track(track_dir: &Path) -> anyhow::Result<AudioSource> {
 
     candidates.sort();
 
-    let path = candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no .flac or .wav file found in {}", track_dir.display()))?;
+    if candidates.is_empty() {
+        anyhow::bail!("no .flac or .wav file found in {}", track_dir.display());
+    }
 
-    decode_track(&path)
+    let mut tracks = Vec::with_capacity(candidates.len());
+    for path in candidates {
+        tracks.push(decode_track(&path)?);
+    }
+
+    let total_frame_count = tracks.iter().map(|track| track.frame_count).sum::<u64>();
+    if total_frame_count == 0 {
+        anyhow::bail!("{} decoded to an empty playlist", track_dir.display());
+    }
+
+    Ok(AudioPlaylist {
+        tracks,
+        total_frame_count,
+    })
 }
 
-fn decode_track(path: &Path) -> anyhow::Result<AudioSource> {
+fn decode_track(path: &Path) -> anyhow::Result<AudioTrack> {
     let metadata = infer_track_metadata(path);
     let file = File::open(path)?;
     let media_source = MediaSourceStream::new(Box::new(file), Default::default());
@@ -684,7 +743,7 @@ fn decode_track(path: &Path) -> anyhow::Result<AudioSource> {
         anyhow::bail!("{} decoded to an empty audio buffer", path.display());
     }
 
-    Ok(AudioSource {
+    Ok(AudioTrack {
         path: path.to_path_buf(),
         title: metadata.title,
         artist: metadata.artist,

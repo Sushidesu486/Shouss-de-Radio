@@ -86,10 +86,11 @@ with packet arrival time.
 
 ## Current Transport Milestone
 
-The server now sends decoded 48 kHz stereo PCM from the first track in
+The server now sends decoded 48 kHz stereo PCM from the sorted playlist in
 `media/tracks` on a global stream timeline. Each browser connection receives
 packets near the current stream position, rather than starting a private sample
-index at zero. The track loops when the stream timeline passes the file length.
+index at zero. The playlist loops when the stream timeline passes the total
+playlist length.
 
 This allows the next milestone to focus on:
 

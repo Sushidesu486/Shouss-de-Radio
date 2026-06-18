@@ -86,8 +86,8 @@ to compare multi-device playback quality while tuning for 10 ms-class sync.
 
 ## Audio Packet v0
 
-The current audio milestone uses PCM packets decoded from the first `.flac` or
-`.wav` file in `media/tracks`:
+The current audio milestone uses PCM packets decoded from the sorted `.flac` and
+`.wav` playlist in `media/tracks`:
 
 ```text
 48 kHz

@@ -66,16 +66,13 @@ packets and a browser-side jitter buffer.
 - Git repository initialized.
 - Project skeleton created.
 - `/ws/control` sends session config and answers clock sync pings.
-- The server loads the first `.flac` or `.wav` file in `media/tracks`.
+- The server loads `.flac` and `.wav` files in `media/tracks` as a sorted
+  playlist.
 - `/ws/audio` sends timestamped 48 kHz stereo PCM float32 packets from that
-  source and loops the track.
+  playlist and loops the playlist.
 - Browser worker receives and parses audio packets.
-- AudioWorklet can play the received PCM stream through a FIFO queue.
-- UI displays clock and audio transport metrics.
-
-The current AudioWorklet playback path is for transport bring-up only. The next
-audio milestone is replacing FIFO playback with timeline-aware jitter-buffer
-playback.
+- AudioWorklet plays packets by stream sample timeline through a jitter buffer.
+- UI displays clock, audio transport, sync quality, and device offset metrics.
 
 ## Media Source
 
@@ -85,16 +82,11 @@ Put source files in:
 media/tracks/
 ```
 
-The current backend loads the first `.flac` or `.wav` file in that directory.
+The current backend loads `.flac` and `.wav` files in that directory as a
+sorted playlist, then loops the playlist.
 For now the source must already be:
 
 ```text
 48 kHz
 stereo
-```
-
-Your current FLAC source is valid:
-
-```text
-media/tracks/塞壬唱片-MSR,浅見武男 - “诺言”.flac
 ```
