@@ -353,6 +353,24 @@ p {
   font-weight: 760;
 }
 
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-title-row h2 {
+  margin-top: 0;
+}
+
+.subtle-button {
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
 .legend {
   display: flex;
   flex-wrap: wrap;
@@ -439,6 +457,45 @@ dd {
 
 .client-panel {
   grid-column: span 2;
+}
+
+.output-panel {
+  grid-column: span 2;
+}
+
+.audio-slider-row {
+  display: grid;
+  grid-template-columns: 76px minmax(140px, 1fr) 70px;
+  gap: 12px;
+  align-items: center;
+  margin-top: 18px;
+}
+
+.audio-slider-row span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.audio-slider-row input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.audio-slider-row strong {
+  color: var(--text);
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.eq-band-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.eq-band-row {
+  margin-top: 0;
 }
 
 .client-list {
@@ -617,6 +674,10 @@ dd {
     grid-column: auto;
   }
 
+  .output-panel {
+    grid-column: auto;
+  }
+
   .client-row {
     grid-template-columns: 1fr;
   }
@@ -644,5 +705,15 @@ dd {
 
   .network-canvas {
     height: 250px;
+  }
+
+  .audio-slider-row {
+    grid-template-columns: 1fr 64px;
+    gap: 8px 10px;
+  }
+
+  .audio-slider-row input {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }

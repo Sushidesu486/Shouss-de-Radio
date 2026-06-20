@@ -58,6 +58,13 @@ type SyncQualityState = {
   sampleCount: number;
 };
 
+type EqBand = {
+  id: string;
+  label: string;
+  frequencyHz: number;
+  gainDb: number;
+};
+
 type ClientDiagnostic = {
   id: number;
   deviceId: string | null;
@@ -96,6 +103,19 @@ type ThemeMode = "light" | "dark";
 const MAX_NETWORK_SAMPLES = 240;
 const MAX_SYNC_QUALITY_SAMPLES = 240;
 const MAX_DEVICE_NAME_CHARS = 40;
+const MIN_VOLUME_PERCENT = 0;
+const MAX_VOLUME_PERCENT = 150;
+const DEFAULT_VOLUME_PERCENT = 100;
+const MIN_EQ_GAIN_DB = -12;
+const MAX_EQ_GAIN_DB = 12;
+const AUDIO_PARAM_RAMP_SECONDS = 0.015;
+const DEFAULT_EQ_BANDS: EqBand[] = [
+  { id: "sub", label: "60 Hz", frequencyHz: 60, gainDb: 0 },
+  { id: "bass", label: "250 Hz", frequencyHz: 250, gainDb: 0 },
+  { id: "mid", label: "1 kHz", frequencyHz: 1_000, gainDb: 0 },
+  { id: "presence", label: "4 kHz", frequencyHz: 4_000, gainDb: 0 },
+  { id: "air", label: "12 kHz", frequencyHz: 12_000, gainDb: 0 }
+];
 
 const createDeviceId = () => {
   const existing = localStorage.getItem("radio.deviceId");
@@ -122,6 +142,42 @@ const createDeviceOutputOffsetMs = () => {
   return Number.isFinite(stored) ? stored : 0;
 };
 
+const createVolumePercent = () => {
+  const stored = Number(localStorage.getItem("radio.volumePercent"));
+  return Number.isFinite(stored)
+    ? clamp(stored, MIN_VOLUME_PERCENT, MAX_VOLUME_PERCENT)
+    : DEFAULT_VOLUME_PERCENT;
+};
+
+const cloneDefaultEqBands = () => DEFAULT_EQ_BANDS.map((band) => ({ ...band }));
+
+const createEqBands = () => {
+  const stored = localStorage.getItem("radio.eqBands");
+  if (!stored) {
+    return cloneDefaultEqBands();
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object") {
+      return cloneDefaultEqBands();
+    }
+
+    return DEFAULT_EQ_BANDS.map((band) => {
+      const gain = parsed[band.id];
+      return {
+        ...band,
+        gainDb:
+          typeof gain === "number" && Number.isFinite(gain)
+            ? clamp(gain, MIN_EQ_GAIN_DB, MAX_EQ_GAIN_DB)
+            : band.gainDb
+      };
+    });
+  } catch {
+    return cloneDefaultEqBands();
+  }
+};
+
 const limitDeviceName = (value: string) =>
   Array.from(value).slice(0, MAX_DEVICE_NAME_CHARS).join("");
 
@@ -131,6 +187,11 @@ const createDeviceName = () =>
   normalizeDeviceName(localStorage.getItem("radio.deviceName") ?? "");
 
 const nowMs = () => performance.timeOrigin + performance.now();
+
+const volumePercentToGain = (volumePercent: number) => volumePercent / 100;
+
+const serializeEqBands = (bands: EqBand[]) =>
+  JSON.stringify(Object.fromEntries(bands.map((band) => [band.id, band.gainDb])));
 
 const formatMs = (value: number | null, digits = 1) => {
   if (value === null || Number.isNaN(value)) {
@@ -166,6 +227,8 @@ const formatRatio = (value: number | null) => {
 
   return value.toFixed(6);
 };
+
+const formatDb = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(1)} dB`;
 
 const connectionLabel = (state: ConnectionState) => {
   switch (state) {
@@ -235,6 +298,8 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const outputGainRef = useRef<GainNode | null>(null);
+  const eqFilterRefs = useRef<BiquadFilterNode[]>([]);
   const streamEnabledRef = useRef(false);
   const targetLatencyRef = useRef<number | null>(null);
   const deviceOutputOffsetRef = useRef(0);
@@ -276,6 +341,8 @@ export function App() {
   const [networkSamples, setNetworkSamples] = useState<NetworkSample[]>([]);
   const [themeMode, setThemeMode] = useState<ThemeMode>(createThemeMode);
   const [deviceName, setDeviceName] = useState(createDeviceName);
+  const [volumePercent, setVolumePercent] = useState(createVolumePercent);
+  const [eqBands, setEqBands] = useState(createEqBands);
   const [deviceOutputOffsetMs, setDeviceOutputOffsetMs] = useState(
     createDeviceOutputOffsetMs
   );
@@ -307,6 +374,29 @@ export function App() {
   useEffect(() => {
     clockRef.current = clock;
   }, [clock]);
+
+  useEffect(() => {
+    localStorage.setItem("radio.volumePercent", `${volumePercent}`);
+    const outputGain = outputGainRef.current;
+    if (outputGain) {
+      outputGain.gain.setTargetAtTime(
+        volumePercentToGain(volumePercent),
+        outputGain.context.currentTime,
+        AUDIO_PARAM_RAMP_SECONDS
+      );
+    }
+  }, [volumePercent]);
+
+  useEffect(() => {
+    localStorage.setItem("radio.eqBands", serializeEqBands(eqBands));
+    eqFilterRefs.current.forEach((filter, index) => {
+      filter.gain.setTargetAtTime(
+        eqBands[index]?.gainDb ?? 0,
+        filter.context.currentTime,
+        AUDIO_PARAM_RAMP_SECONDS
+      );
+    });
+  }, [eqBands]);
 
   useEffect(() => {
     const normalized = normalizeDeviceName(deviceName);
@@ -587,10 +677,34 @@ export function App() {
         } satisfies WorkerCommand);
       }
     };
-    node.connect(audioContext.destination);
+
+    const outputGain = audioContext.createGain();
+    outputGain.gain.value = volumePercentToGain(volumePercent);
+
+    const eqFilters = eqBands.map((band) => {
+      const filter = audioContext.createBiquadFilter();
+      filter.type = "peaking";
+      filter.frequency.value = band.frequencyHz;
+      filter.Q.value = 1;
+      filter.gain.value = band.gainDb;
+      return filter;
+    });
+
+    if (eqFilters.length === 0) {
+      node.connect(outputGain);
+    } else {
+      node.connect(eqFilters[0]);
+      eqFilters.forEach((filter, index) => {
+        const next = eqFilters[index + 1] ?? outputGain;
+        filter.connect(next);
+      });
+    }
+    outputGain.connect(audioContext.destination);
 
     audioContextRef.current = audioContext;
     workletNodeRef.current = node;
+    outputGainRef.current = outputGain;
+    eqFilterRefs.current = eqFilters;
     node.port.postMessage({
       type: "calibrationPulse",
       enabled: calibrationPulseEnabled
@@ -615,6 +729,20 @@ export function App() {
   const pauseListening = () => {
     setStreamEnabled(false);
     postWorker({ type: "setAudioEnabled", enabled: false });
+  };
+
+  const updateEqBand = (bandId: string, gainDb: number) => {
+    setEqBands((bands) =>
+      bands.map((band) =>
+        band.id === bandId
+          ? { ...band, gainDb: clamp(gainDb, MIN_EQ_GAIN_DB, MAX_EQ_GAIN_DB) }
+          : band
+      )
+    );
+  };
+
+  const resetEq = () => {
+    setEqBands(cloneDefaultEqBands());
   };
 
   const leadDriftMs =
@@ -796,6 +924,53 @@ export function App() {
               <dd>{formatMs(leadDriftMs)}</dd>
             </div>
           </dl>
+        </article>
+
+        <article className="panel output-panel">
+          <div className="panel-title-row">
+            <h2>Audio Output</h2>
+            <button type="button" className="subtle-button" onClick={resetEq}>
+              Reset EQ
+            </button>
+          </div>
+          <label className="audio-slider-row">
+            <span>Volume</span>
+            <input
+              type="range"
+              min={MIN_VOLUME_PERCENT}
+              max={MAX_VOLUME_PERCENT}
+              step="1"
+              value={volumePercent}
+              onChange={(event) =>
+                setVolumePercent(
+                  clamp(
+                    Number(event.currentTarget.value),
+                    MIN_VOLUME_PERCENT,
+                    MAX_VOLUME_PERCENT
+                  )
+                )
+              }
+            />
+            <strong>{Math.round(volumePercent)}%</strong>
+          </label>
+          <div className="eq-band-list">
+            {eqBands.map((band) => (
+              <label className="audio-slider-row eq-band-row" key={band.id}>
+                <span>{band.label}</span>
+                <input
+                  type="range"
+                  min={MIN_EQ_GAIN_DB}
+                  max={MAX_EQ_GAIN_DB}
+                  step="0.5"
+                  value={band.gainDb}
+                  onChange={(event) =>
+                    updateEqBand(band.id, Number(event.currentTarget.value))
+                  }
+                />
+                <strong>{formatDb(band.gainDb)}</strong>
+              </label>
+            ))}
+          </div>
         </article>
 
         <article className="panel client-panel">
